@@ -9,6 +9,7 @@ except ImportError:
 import urwid
 import bytes_as_braille as bab
 from collections import deque
+from time import sleep
 
 
 PROGNAME="G-Wiz"
@@ -31,8 +32,8 @@ This program moves g-code instructions from the developper's mind (or G-Code fil
 
 Modes of operation:
 - 'normal': typed text is sent to the machine from the top of the 'wait' pile (enable with 'esc' key, also clears command line)
-- 'search': search for the typed words in machine's command description (enable with 'alt+s') ; the list of commands (and their description) is specific to each machine in order to allow customization.
-- 'command': execute a built-in command to interract with G-Wiz (enable with 'atl+c', also shows list of commands)
+- 'search': search for the typed words in machine's command description (enable with 'alt+s' or '?') ; the list of commands (and their description) is specific to each machine in order to allow customization.
+- 'command': execute a built-in command to interract with G-Wiz (enable with ':' like in Vi, also shows list of commands in the help box)
 - 'history': replay a command previously sent (or scheduled to be sent) to the machine (enable with '!<str>' or '<int>', where <int> is the negative index of the command to be replayed. TODO)
 
 G-Wiz makes it possible to alter parameters such as feedrate, extrusion ratio and temperatures on-the-fly and keep track of these changes to optimize subsequent prints ; this includes adding comments, pauses (TODO), user-defined macros. This makes G-Wiz a powerful G-Code post-processor and a friendly ally to tune machine parameters.
@@ -157,7 +158,12 @@ class WQueue:
     def pop(self, pos):
         # deque.rotate() is speedy
         self.content.rotate(-pos)
+        #try:
         item = self.content.popleft()
+        #except IndexError as e:
+        #    print(f"Warning: queue was empty! [0]")
+        #    #raise
+        #else:
         self.content.rotate(pos)
         return item
 
@@ -246,8 +252,8 @@ class WIPPile(WQueue):
     write to serial
 """
 def pop_to_serial(s, pile):
+    #print('pop_to_serial()', pile)
     try:
-        #print('pop_to_serial()', pile)
         wip_pile.append( cmd := pile.pop(0), 'serial' )
         #print('pop_to_serial()', cmd)
         if not PRINT_PAUSED:
@@ -276,8 +282,22 @@ def pop_to_serial(s, pile):
 """
 def read_from_serial(s):
     do_update_ack = None
-    MACHINE_READY=False # TODO depends on firmware
     cmd_errors = deque()
+
+    # NOTE this depends on firmware and 
+    # it makes GWiz wait for a 'start' from the printer
+    MACHINE_READY=False
+    # STOP Restart with flush so we get an ersatz of a 'start' (apparently it depends on serial port type :-s) ; this is 
+    #wip_pile.append(b'STOP Restart')
+    #wip_pile.append(b'M999 S0')
+    #s.write(b'M999 S0\n')
+    # trying the same with reboot.. FAIL
+    #wip_pile.append(b'REBOOT')
+    #wip_pile.append(b'M997')
+    #s.write(b'M997\n')
+    # NOTE the above commented code is a crap workaround to the issue that CDC serial re-enumerates on reset
+    #   and also with disabled/0 NO_TIMEOUTS if connection is lost and the machine's buffer is empty by then.
+    #   kept for reference.
 
     try:
         while True:
@@ -286,11 +306,19 @@ def read_from_serial(s):
             try:
                 if reply.startswith(b'ok'):
                     while True:
+                        #try:
                         if (last_wip_command_with_ts := wip_pile.pop(0))[1].startswith(b';'):
                             ack_pile.append( last_wip_command_with_ts, '0' )
                         else:
                             break
-
+                        #except TypeError:
+                        #    print(f"read_from_serial(): queue was empty! [1] {reply}")
+                        #    #raise
+                        #    break
+                        #except IndexError:
+                        #    print("read_from_serial(): queue was empty, sending 'STOP Restart'")
+                        #    s.write(b'M999 S0\n')   # STOP Restart with flush
+                            
                     try:
                         if last_wip_command_with_ts[1] == cmd_errors[0]:
                             ack_pile.append( (last_wip_command_with_ts, ('error','Unknown command') ), '1')
@@ -303,13 +331,20 @@ def read_from_serial(s):
                         #print('whoops', last_wip_command_with_ts)
                         ack_pile.append( (last_wip_command_with_ts, ('ack_msg',reply)), '2' )
                         # TODO update position if last command is one of G0-G5 ?
+                    #except TypeError:
+                    #    print("read_from_serial(): queue was empty! [2]")
+                    #    #raise
+                        
 
                     if reply.startswith(b'ok T:'):
                         reply = reply[2:]
                         raise GotTempReport
+                    # else: TODO throttling and "skip" in cas of missed ACK message
+                    # see also https://reprap.org/wiki/GCODE_buffer_multiline_proposal
                 elif reply in [b'wait',b'echo:busy: processing']:
                     # ignore this shit, we don't need that as a "clock" XD
                     # see HOST_KEEPALIVE_FEATURE DEFAULT_KEEPALIVE_INTERVAL BUSY_WHILE_HEATING NO_TIMEOUTS
+                    MACHINE_READY = True
                     pass
                 elif reply.startswith(b'X:'):
                     machine_pos.set_text(reply.split(b' Count ',1)[0])
@@ -404,7 +439,14 @@ def serial_comm_still_ok(data):
     else:
         # this must be forced / redefined, because the internal widgets change and we're not recycling widgets (TODO: FIX!)
         all_wai = urwid.Columns([wai_pile.widget, *[gcode_piles[filename].widget for filename in gcode_piles.keys()]])
-        cmd_pile.contents = [ (w,('pack',None)) for w in [ ack_pile.widget, wip_pile.widget, all_wai, editmap ]]
+        while True:
+            try:
+                cmd_pile.contents = [ (w,('pack',None)) for w in [ ack_pile.widget, wip_pile.widget, all_wai, editmap ]]
+                break
+            except RuntimeError as e:
+                print(f"Warning (id:KCD4JD72G): {e}")
+                sleep(.1)
+
 
         return True
 
@@ -427,7 +469,8 @@ commands_ack = [
     limitation: try not to exceed DISP_WAI_LEN or weird things may happen
 """
 commands_wai = [
-    b'M155 S1',  # temperatures auto-report
+    #b'M997',    # reboot
+    b'M155 S1', # temperatures auto-report
 ]
 if len(commands_wai) > DISP_WAI_LEN:
     raise NotImplementedError
@@ -512,15 +555,22 @@ class UserInput(urwid.Padding):
 
         #if key.startswith('ctrl'):
         #    edit.edit_text = key
+        # TODO also match on partial strings if there is no ambiguity or obvious precedence
         match key:
             case 'esc':
                 EDIT_MODE = 'normal'
                 edit.set_caption('>>> ')
                 edit.edit_text = ''
+
+            # NOTE both that follow should be a single clause.... too bad we can't just not add "break;" like in C
             case 'meta s':
                 EDIT_MODE = 'search'
                 edit.set_caption('??? ')
-            case 'meta c':
+            case '?':
+                EDIT_MODE = 'search'
+                edit.set_caption('??? ')
+
+            case ':':
                 EDIT_MODE = 'command'
                 edit.set_caption('### ')
             case '!':
@@ -556,6 +606,16 @@ class UserInput(urwid.Padding):
                             PRINT_PAUSED = False
                         case 'pause':
                             PRINT_PAUSED = True
+                        case 'force':
+                            wip_pile.append(b'caca')
+                            print("appended 'caca' to wip_pile")
+                        case 'debug':
+                            print(ack_pile)
+                            print(wip_pile)
+                            print(wai_pile)
+                        case 'quit':
+                            print("quit on user request")
+                            raise SystemExit
                         case _:
                             messages.contents = [ (urwid.Text(('error',f"uh? `{edit.edit_text}`")), ('pack',None)), *messages.contents ]
                     edit.edit_text = ''
@@ -586,8 +646,6 @@ class UserInput(urwid.Padding):
                 case 'command':
                     info_dic.contents = [
                         (urwid.Text('Available commands:'),('pack',None)),
-                        (urwid.Text("feedrate <value> (alter feedrate by percentage when sending ('wait'->'wip')) TODO"),('pack',None)),
-                        (urwid.Text("extrusion <value> (alter extrusion by percentage when sending ('wait'->'wip')) TODO"),('pack',None)),
                         (urwid.Text('run (start flushing G-code piles)'),('pack',None)),
                         (urwid.Text('pause'),('pack',None)),
                         (urwid.Text('load <filename.gcode> TODO'),('pack',None)),
@@ -595,10 +653,11 @@ class UserInput(urwid.Padding):
                         (urwid.Text('offset X Y <filename.gcode> TODO'),('pack',None)),
                         (urwid.Text('save <filename.gcode> TODO'),('pack',None)),
                         (urwid.Text("flush (abort print & clear 'wait' pile) TODO"),('pack',None)),
-                        (urwid.Text("force_ack (push one more command into WIP queue... sometimes bad reporting!) TODO"),('pack',None)),
+                        (urwid.Text("force (push one more command into WIP queue... sometimes bad reporting! TODO)"),('pack',None)),
                         (urwid.Text('connect <port> TODO'),('pack',None)),
                         (urwid.Text('buffsize <int> TODO'),('pack',None)),
-                        (urwid.Text('quit TODO'),('pack',None)),
+                        (urwid.Text('debug'),('pack',None)),
+                        (urwid.Text('quit'),('pack',None)),
                     ]
             return super().keypress(size, key)
 
@@ -643,10 +702,11 @@ def main(SER, machine_name, serial_port, maxtempi, gcodes):
     wai_pile = WQueue( 'User input pile', commands_wai, display_size = DISP_WAI_LEN, viewport_start = 0 )
 
     gcode_piles = {}
-    for gcode in gcodes:
-        print(f"Loading file: {gcode}")
-        with open(gcode,'rb') as g:
-            gcode_piles[gcode] = WQueue( gcode, [line.rstrip(b'\n').replace(b'\t', b' ') for line in g.readlines() if line != b'\n'], display_size = DISP_WAI_LEN, viewport_start = 0 )
+    if gcodes:
+        for gcode in gcodes:
+            print(f"Loading file: {gcode}")
+            with open(gcode,'rb') as g:
+                gcode_piles[gcode] = WQueue( gcode, [line.rstrip(b'\n').replace(b'\t', b' ') for line in g.readlines() if line != b'\n'], display_size = DISP_WAI_LEN, viewport_start = 0 )
         #print(gcode_piles[gcode])
         #print(gcode_piles[gcode].widget.contents)
 
@@ -729,6 +789,9 @@ if __name__ == '__main__':
     parser.add_argument("-b", "--baudrate", default = None, type=int, help="baud rate override", metavar="int")
 
     args = parser.parse_args()
+    if args.config is None:
+        print('ERROR: need to specify machine configuration with "--config"')
+        raise SystemExit
 
     """
         read machine config
@@ -758,20 +821,21 @@ if __name__ == '__main__':
                 #print("GOT COMMAND:",command,desc)
 
     # Validate GCODE input
-    for gcode in args.gcode:
-        if gcode is not None and os.path.exists(gcode):
-            if os.path.isfile(gcode):
-                if gcode.strip().lower().endswith(".gcode"):
-                    pass
+    if args.gcode:
+        for gcode in args.gcode:
+            if gcode is not None and os.path.exists(gcode):
+                if os.path.isfile(gcode):
+                    if gcode.strip().lower().endswith(".gcode"):
+                        pass
+                    else:
+                        print(f"{gcode} does not have .gcode extension.")
+                        sys.exit()
                 else:
-                    print(f"{gcode} does not have .gcode extension.")
+                    print(f"{gcode} is not a file.")
                     sys.exit()
-            else:
-                print(f"{gcode} is not a file.")
+            elif gcode is not None:
+                print(f"{gcode} does not exist.")
                 sys.exit()
-        elif gcode is not None:
-            print(f"{gcode} does not exist.")
-            sys.exit()
 
     print(BANNER)
     try:
