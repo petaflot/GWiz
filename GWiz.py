@@ -467,10 +467,11 @@ commands_ack = [
     commands added here will be auto-sent to printer as soon as it is ready
 
     limitation: try not to exceed DISP_WAI_LEN or weird things may happen
+
+    TODO put this in printer config
 """
 commands_wai = [
-    #b'M997',    # reboot
-    b'M155 S1', # temperatures auto-report
+    #b'M155 S1', # temperatures auto-report
 ]
 if len(commands_wai) > DISP_WAI_LEN:
     raise NotImplementedError
@@ -661,8 +662,12 @@ class UserInput(urwid.Padding):
                     ]
             return super().keypress(size, key)
 
+try:
+    from hello_world import dummy_compiler
+except ImportError:
+    def dummy_compiler( data, ttable = None, oddLine = True ):
+        return [data], [None for _ in range(len(data))]
 
-from hello_world import dummy_compiler
 def search_and_highlight( needle, stack, widget = tuple, target = print ):
     #stack = [s[::-1] for s in stack[::-1].split('\t',1)[::-1]]
     cmd, desc = stack.split('\t',1)
