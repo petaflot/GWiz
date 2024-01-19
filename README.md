@@ -28,7 +28,7 @@ for example
 ./GWiz.py -c machine.conf -g part0.gcode -g part1.gcode 2>/tmp/gwiz.log
 ```
 
-and simaultaneously running
+and simultaneously running
 ```
 tail -f /tmp/gwiz.log
 ```
@@ -37,6 +37,12 @@ in another term for debug output should this be required.
 # Note
 
 G-Code Wizard is in early development stage.
+
+# Screenshot
+
+![static/GWiz.jpg](static/GWiz.jpg)
+
+GWiz playing the Tetris theme while the use is searching for commands whose description contains the words terms `hot` and `tem`.
 
 
 [^print]: prints or any other program sent to a machine

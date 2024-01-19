@@ -274,18 +274,19 @@ def read_from_serial(s):
             try:
                 if reply.startswith(b'ok'):
                     while True:
-                        #try:
-                        if (last_wip_command_with_ts := wip_pile.pop(0))[1].startswith(b';'):
-                            ack_pile.append( last_wip_command_with_ts, '0' )
-                        else:
-                            break
+                        try:
+                            if (last_wip_command_with_ts := wip_pile.pop(0))[1].startswith(b';'):
+                                ack_pile.append( last_wip_command_with_ts, '0' )
+                            else:
+                                break
                         #except TypeError:
                         #    print(f"read_from_serial(): queue was empty! [1] {reply}")
                         #    #raise
                         #    break
-                        #except IndexError:
-                        #    print("read_from_serial(): queue was empty, sending 'STOP Restart'")
-                        #    s.write(b'M999 S0\n')   # STOP Restart with flush
+                        except IndexError:
+                            messages.append(f'received "{reply}" but wip_queue was empty!')
+                            #print("read_from_serial(): queue was empty, sending 'STOP Restart'")
+                            break
                             
                     try:
                         if last_wip_command_with_ts[1] == cmd_errors[0]:
@@ -407,12 +408,16 @@ def serial_comm_still_ok(data):
     else:
         # this must be forced / redefined, because the internal widgets change and we're not recycling widgets (TODO: FIX!)
         all_wai = urwid.Columns([wai_pile.widget, *[gcode_piles[filename].widget for filename in gcode_piles.keys()]])
+        i = 0
         while True:
             try:
                 cmd_pile.contents = [ (w,('pack',None)) for w in [ ack_pile.widget, wip_pile.widget, all_wai, editmap ]]
                 break
             except RuntimeError as e:
-                print(f"Warning (id:KCD4JD72G): {e}")
+                if i == 10:
+                    print(f"Warning (id:KCD4JD72G): {e} (message repeated 10 times)")
+                    i = 0
+                i += 1
                 sleep(.1)
 
 

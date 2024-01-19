@@ -3,16 +3,23 @@
 PROGDESC = """
     attempts to convert a MIDI file into G300 instructions
 
+    https://alexyu132.github.io/midi-m300/
+
+    https://en.wikipedia.org/wiki/MIDI
+    https://marlinfw.org/docs/gcode/M300.html
+
     MIDI files can be generated with the appropriate hardware
     or tools like musicpy, or found online
+
+    Not to be confused with
+        https://www.ultimatesolver.com/en/midi2gcode
+        https://github.com/michthom/MIDI-to-CNC
+    which use the noise from the stepper motors + drivers to play music.
 """
 from mido import *
 
-# TODO remove this, dirty hack until timing is figured out
-NOTE_LEN = 200
-BLANK_LEN = 100
-
 # chromatic scale https://en.wikipedia.org/wiki/Chromatic_scale
+# values pulled from https://muted.io/note-frequencies/ ; reference frequency at 440Hz
 keys = [
 	('C',	(16.35,	32.7,	65.41,	130.81,	261.63,	523.25,		1046.5,		2093,		4186),      ),
 	('C#',	(17.32,	34.65,	69.3,	138.59,	277.18,	554.37,		1108.73,	2217.46,	4434.92),      ),
@@ -28,6 +35,8 @@ keys = [
 	('B',	(30.87,	61.74,	123.47,	246.94,	493.88,	987.77,		1975.53,	3951,		7902.13),      ),
 ]
 
+tempo = 120
+
 class Note:
     def __init__(self, m):
         self.note = m.note
@@ -38,16 +47,19 @@ class Note:
     def __str__(self):
         if self.velocity == 0:
             # we need to cheat because Marlin doesn't support loudness -> feature request ;-)
-            return f"M300 P{BLANK_LEN} S0"
+            #return f"M300 P{BLANK_LEN} S0"
+            return f"G4 P{10000*self.time/tempo}"
         else:
             octave, note = divmod(self.note,8)
             note = keys[note-4]
-            return f"M300 P{NOTE_LEN} S{note[1][octave-3]:.2f}; [Hz] {note[0]}{octave-3}"
+            return f"M300 P{10000*self.time/tempo:.2f} S{note[1][octave-3]:.2f} ; {note[0]}{octave-3}"
+
 
 def midi_to_m300(midi_file, track_num = None):
-
+    global tempo
     yield f'; converted from "{midi_file}"'
     z=MidiFile(midi_file, clip=True)
+    last_time = -0
 
     _key = []
     for n, t in enumerate(z.tracks):
@@ -64,7 +76,6 @@ def midi_to_m300(midi_file, track_num = None):
         if len(z.tracks) > 1:
             n = int(input("track # to encode: "))
             t = z.tracks[n]
-            raise SystemExit
         else:
             t = z.tracks[0]
     else:
@@ -77,14 +88,29 @@ def midi_to_m300(midi_file, track_num = None):
         if m.type == 'note_on':
                 #print('\n', m)
                 N = Note(m)
-                N.note = m.note
-                N.total_duration = m.velocity
-                N.remainder_duration = m.time
                 try:
-                    yield str(N)
-                except Exception as e:
-                    raise
-                    print(e)
+                    dtime = N.time-previous_note.time
+                    #print(f"{dtime=}")
+                    if dtime > 0:
+                        #print('!!!')
+                        previous_note.time = dtime
+                    elif dtime < 0:
+                        #print('???')
+                        previous_note.time = N.time
+                    #print(previous_note.time)
+                except UnboundLocalError:
+                    pass
+                else:
+                    try:
+                        yield str(previous_note)
+                    except Exception as e:
+                        raise
+                        print(e)
+                finally:
+                    previous_note = N
+    #print(previous_note.time)
+    #print(f"dtime = {N.time-previous_note.time}")
+    yield str(previous_note)
 
 
 if __name__ == '__main__':
