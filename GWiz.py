@@ -214,7 +214,7 @@ class ACKPile(WQueue):
         except TypeError:
             if item[1][0] == 'error':
                 logger.error(f"{item[1][1]}:{item[0][1].decode()}")
-                result.debug(f"{item[1][1]}:{item[0][1].decode()}")
+                result.debug(f";!! ERROR ({machine_name}): {item[1][1]}:{item[0][1].decode()}")
             else:
                 logger.critical(f"TODO (FJ482HD7): >>>{item}<<<")
         except Exception as e:
@@ -812,7 +812,8 @@ if __name__ == '__main__':
         logger.critical('need to specify machine configuration with "--config"')
         sys.exit()
 
-    out_formatter = logging.Formatter('%(levelname)s\t%(message)s')
+    #out_formatter = logging.Formatter('%(levelname)s\t%(message)s')    # keep for debugging..
+    out_formatter = logging.Formatter('%(message)s')
     """
         read machine config
     """
