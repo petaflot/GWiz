@@ -1,11 +1,18 @@
 #!/usr/bin/env python
 # vim: number
-from __future__ import annotations  # what is this even for?!?
+from __future__ import annotations  # NOTE: what does this actually do?
 import os
+import sys
+import logging
+import logging.config
+logging.config.fileConfig(fname='logging.ini', disable_existing_loggers=False)
+logger = logging.getLogger('stderrLogger')
+
 try:
     import serial
 except ImportError:
     raise Exception("module 'pyserial' is required")
+
 import urwid
 import bytes_as_braille as bab
 from collections import deque
@@ -49,13 +56,6 @@ MAX_COMMANDS_IN_WIP = 5
 # max lines to show in piles
 DISP_ACK_LEN = 30
 DISP_WAI_LEN = 10
-
-from sys import stderr
-ERRLOG = stderr#open('/tmp/G-Wiz.log','w')
-_print = print
-def print(*args, **kwargs):
-    _print(*args, file=ERRLOG, **kwargs)
-
 
 # exceptions and error messages:
 class GotTempReport(Exception): pass
@@ -129,7 +129,7 @@ class WQueue:
         #try:
         item = self.content.popleft()
         #except IndexError as e:
-        #    print(f"Warning: queue was empty! [0]")
+        #    logger.info(f"queue was empty! [0]")
         #    #raise
         #else:
         self.content.rotate(pos)
@@ -169,13 +169,13 @@ class ACKPile(WQueue):
                             (TIME_LEN, urwid.Text( ('timestamp', tup[1][0].strftime(TIME_FMT)) )),
                         ])
                 except IndexError:
-                    print("IndexError ; full ACK message", tup[0], '---', tup[1])
+                    logger.info(f"IndexError ; full ACK message {tup[0]} --- {tup[1]}")
                     raise
                 except TypeError:
-                    print("IndexError ; full ACK message", tup[0], '---', tup[1])
+                    logger.info(f"IndexError ; full ACK message {tup[0]} --- {tup[1]}")
                     raise
             else:
-                #print("no-ACK message", tup[0], '---', tup[1])
+                #logger.debug(f"no-ACK message {tup[0]} --- {tup[1]}")
                 return urwid.Columns([
                         (TIME_LEN, urwid.Text( '' )),
                         #urwid.Text( self.linecolor( tup[1][1] )),
@@ -183,16 +183,43 @@ class ACKPile(WQueue):
                         (TIME_LEN, urwid.Text( ('timestamp', tup[1][0].strftime(TIME_FMT)) )),
                     ])
         else:
-            #print("short ACK message", tup[0][0], '---', tup[0][1])
+            #logger.info(f"short ACK message {tup[0][0]} --- {tup[0][1]}")
             return urwid.Columns([
                     (TIME_LEN, urwid.Text( ('timestamp', tup[0][0].strftime(TIME_FMT)) )),
                     urwid.Text( tup[0][1] ),
                 ])
 
     def append(self, item, where = None):
-        #if where:
-        #    print(f"ACK: appending {(item[0], (pendulum.now(), item[1]))} ({where})")
-        self.content.append( (item[0], (pendulum.now(), item[1])) )
+        now = pendulum.now()
+        if where:
+            logger.debug(f"ACK: appending {(item[0], (now), item[1])} ({where})")
+        self.content.append( (item[0], (now, item[1])) )
+        # TODO add machines names?
+        #case 'greeter':
+        #    result.critical(f"{now}: Gwiz started")  
+        try:
+            if item[1][1].startswith(b'ok'):
+                result.error(item[0][1].decode())
+            elif item[0] is None:
+                if item[1][1].startswith(b';'):
+                    # this maybe a comment we sent? don't need to over-commment
+                    result.warning(item[1][1].decode())
+                elif item[1][0] in ('status_msg',):
+                    # communication from printer ; can't be replayed as-is in gcode so we double-comment it
+                    result.info(';; '+item[1][1].decode())
+                else:
+                    logger.info('??? '+str(item))
+            else:
+                logger.info('!!! '+str(item))
+        except TypeError:
+            if item[1][0] == 'error':
+                logger.error(f"{item[1][1]}:{item[0][1].decode()}")
+                result.debug(f"{item[1][1]}:{item[0][1].decode()}")
+            else:
+                logger.critical(f"TODO (FJ482HD7): >>>{item}<<<")
+        except Exception as e:
+            logger.critical(f"{e} (FK582H5H): {item}")
+
 
 class WIPPile(WQueue):
     def subwidget(self, *args, **kwargs):
@@ -205,8 +232,8 @@ class WIPPile(WQueue):
     #    return super().widget()
 
     def append(self, item, where = None):
-        #if where:
-        #    print(f"WIP: appending {(pendulum.now(), item)} ({where})")
+        if where:
+            logger.debug(f"WIP: appending {(pendulum.now(), item)} ({where})")
         try:
             if self.content[0][1].startswith(b';'):
                 ack_pile.append( (None,wip_pile.pop(0)) )
@@ -220,10 +247,10 @@ class WIPPile(WQueue):
     write to serial
 """
 def pop_to_serial(s, pile):
-    #print('pop_to_serial()', pile)
+    #logger.debug('pop_to_serial()', pile)
     try:
         wip_pile.append( cmd := pile.pop(0), 'serial' )
-        #print('pop_to_serial()', cmd)
+        #logger.debug('pop_to_serial()', cmd)
         if not PRINT_PAUSED:
             raise IndexError
         #messages.contents = [ (urwid.Text(('',f"{cmd} {PRINT_PAUSED = }")), ('pack',None)), *messages.contents ]
@@ -240,7 +267,7 @@ def pop_to_serial(s, pile):
     # strip comments and invalid commands
     if not cmd.strip().startswith(b';') and not cmd.isspace() and len(cmd) > 0:
         s.write((cmd+b'\n'))
-        #print(f">>> {cmd}")
+        logger.debug(f">>> {cmd}")
 
 
 """
@@ -270,7 +297,7 @@ def read_from_serial(s):
     try:
         while True:
             reply = s.readline().rstrip(b'\n')
-            #print(f"<<< {reply}")
+            logger.debug(f"<<< {reply}")
             try:
                 if reply.startswith(b'ok'):
                     while True:
@@ -280,12 +307,11 @@ def read_from_serial(s):
                             else:
                                 break
                         #except TypeError:
-                        #    print(f"read_from_serial(): queue was empty! [1] {reply}")
+                        #    logger.info(f"read_from_serial(): queue was empty! [1] {reply}")
                         #    #raise
                         #    break
                         except IndexError:
-                            messages.append(f'received "{reply}" but wip_queue was empty!')
-                            #print("read_from_serial(): queue was empty, sending 'STOP Restart'")
+                            logger.warning("read_from_serial(): received '{reply}' but queue was empty")
                             break
                             
                     try:
@@ -297,11 +323,11 @@ def read_from_serial(s):
                     except IndexError:
                         # normal command here, nothing special
                         # TODO it would be nice to split and color trailing comments
-                        #print('whoops', last_wip_command_with_ts)
+                        #logger.info('whoops', last_wip_command_with_ts)
                         ack_pile.append( (last_wip_command_with_ts, ('ack_msg',reply)), '2' )
                         # TODO update position if last command is one of G0-G5 ?
                     #except TypeError:
-                    #    print("read_from_serial(): queue was empty! [2]")
+                    #    logger.info("read_from_serial(): queue was empty! [2]")
                     #    #raise
                         
 
@@ -322,18 +348,17 @@ def read_from_serial(s):
                 elif reply.startswith(b'echo:'):
                     if reply.startswith(b'echo:Unknown command:'):
                         cmd_errors.append( reply.lstrip(b'echo:Unknown command:').split(b'"',2)[1] )
-                        #print(f"{cmd_errors[-1] = }")
+                        logger.debug(f"{cmd_errors[-1] = }")
                     else:
                         ack_pile.append( (None, ('echo', reply)), '3' )
                 elif reply.startswith(b'//'):
                     #add_to_ack( (pendulum.now(), (reply.decode().rstrip('\n'), 'misc_status')) )
                     ack_pile.append( (None, ('misc_status', reply)), '4' )
                 else:
-                    #print(f"<<< {reply}")
                     # TODO works with Marlin 2.1.x, not 1.x, other firmwres untested (put in config?)
                     if reply == b'pages_ready':
                         MACHINE_READY = True
-                        #print("machine ready")
+                        logger.info("machine ready")
                         messages.contents = [ (urwid.Text(('',b'Machine ready :-)')), ('pack',None)), *messages.contents ]
                     elif reply == b'start':
                         machine_status.set_text((b'status_OK',machine_status.get_text()[0]))
@@ -353,21 +378,20 @@ def read_from_serial(s):
                         tbars[label][1].set_completion(target)
                         tbars[label][2].set_completion(float(temp))
                     except (ValueError, IndexError) as e:
-                        print(e, bab.to_braille(reply))
+                        logger.info(f"{E} (GJE72JDH): {bab.to_braille(reply)}")
 
             # downshift commands if required (send to printer)
             if MACHINE_READY:
                 while len(wai_pile) and not wip_pile.is_saturated:
                     pop_to_serial(s, wai_pile )
 
-                #from time import sleep
                 if not PRINT_PAUSED:
                     for gco_pile in gcode_piles.keys():
-                        #print(f"flushing pile {gco_pile}")
+                        logger.debug(f"flushing pile {gco_pile}")
                         while len(gcode_piles[gco_pile]) and not wip_pile.is_saturated:
-                            #print(f"will pop {gcode_piles[gco_pile].content[0]}")
+                            #logger.info(f"will pop {gcode_piles[gco_pile].content[0]}")
                             pop_to_serial(s, gcode_piles[gco_pile] )
-                            #print(f"flushing pile {gcode_piles[gco_pile]}")
+                            #logger.info(f"flushing pile {gcode_piles[gco_pile]}")
                             #sleep(1)
 
             try:
@@ -415,7 +439,9 @@ def serial_comm_still_ok(data):
                 break
             except RuntimeError as e:
                 if i == 10:
-                    print(f"Warning (id:KCD4JD72G): {e} (message repeated 10 times)")
+                    logger.info(f"Warning (id:KCD4JD72G): {e} (message repeated 10 times)")
+                else:
+                    logger.debug(f"Warning (id:KCD4JD72G): {e}")
                     i = 0
                 i += 1
                 sleep(.1)
@@ -552,6 +578,9 @@ class UserInput(urwid.Padding):
                 if edit.edit_text == '':
                     EDIT_MODE = 'history'
                     edit.set_caption('>>> ')
+            case 'ctrl p':
+                PRINT_PAUSED = not PRINT_PAUSED
+                
 
         if key == 'enter' and edit.edit_text != '':
             match EDIT_MODE:
@@ -583,13 +612,13 @@ class UserInput(urwid.Padding):
                             PRINT_PAUSED = True
                         case 'force':
                             wip_pile.append(b'caca')
-                            print("appended 'caca' to wip_pile")
+                            logger.debug("appended 'caca' to wip_pile")
                         case 'debug':
-                            print(ack_pile)
-                            print(wip_pile)
-                            print(wai_pile)
+                            logger.debug(ack_pile)
+                            logger.debug(wip_pile)
+                            logger.debug(wai_pile)
                         case 'quit':
-                            print("quit on user request")
+                            logger.info("quit on user request")
                             raise SystemExit
                         case _:
                             messages.contents = [ (urwid.Text(('error',f"uh? `{edit.edit_text}`")), ('pack',None)), *messages.contents ]
@@ -683,16 +712,16 @@ def main(SER, machine_name, serial_port, maxtempi, gcodes):
     gcode_piles = {}
     if gcodes:
         for gcode in gcodes:
-            print(f"Loading file: {gcode}")
+            logger.info(f"Loading file: {gcode}")
             with open(gcode,'rb') as g:
                 gcode_piles[gcode] = WQueue( gcode, [line.rstrip(b'\n').replace(b'\t', b' ') for line in g.readlines() if line != b'\n'], display_size = DISP_WAI_LEN, viewport_start = 0 )
-        #print(gcode_piles[gcode])
-        #print(gcode_piles[gcode].widget.contents)
+        #logger.info(gcode_piles[gcode])
+        #logger.info(gcode_piles[gcode].widget.contents)
 
-    #print('>>>', wai_pile.widget)
-    #print('>>>', [gcode_piles[filename].widget for filename in gcode_piles.keys()])
+    #logger.info('>>>', wai_pile.widget)
+    #logger.info('>>>', [gcode_piles[filename].widget for filename in gcode_piles.keys()])
     all_wai = urwid.Columns([wai_pile.widget, *[gcode_piles[filename].widget for filename in gcode_piles.keys()]])
-    #print(all_wai)
+    #logger.info(all_wai)
     #all_wai = urwid.SolidFill('?')
 
     editmap = urwid.AttrMap( UserInput(edit), 'prompt' )
@@ -761,17 +790,29 @@ if __name__ == '__main__':
         prog=PROGNAME,
         description=PROGDESC,
     )
-
     parser.add_argument("-c", "--config", help="machine configuration", default = None, metavar="file")
     parser.add_argument("-g", "--gcode", help="gcode to preload", default = None, metavar="file", nargs='*')
     parser.add_argument("-p", "--port", default = None, help="serial port override", metavar="device")
     parser.add_argument("-b", "--baudrate", default = None, type=int, help="baud rate override", metavar="int")
 
-    args = parser.parse_args()
-    if args.config is None:
-        print('ERROR: need to specify machine configuration with "--config"')
-        raise SystemExit
+    parser.add_argument("-l", "--log", default = '/var/log/GWiz/GWiz.log', help="write log to file", metavar="file")
+    parser.add_argument("--log-level", default = 'WARNING', help="log level", metavar="str")
+    parser.add_argument("--log-mode", default = 'a', help="open log in mode [w|a]", metavar="str")
+    parser.add_argument("-o", "--out", default = None, help="write machine I/O to file", metavar="file")
+    parser.add_argument("--out-level", default = 'DEBUG', help="machine output level", metavar="str")
+    parser.add_argument("--out-mode", default = 'w', help="open machine output file in mode [w|a]", metavar="str")
 
+    args = parser.parse_args()
+    
+    logger.setLevel(args.log_level)
+    logger.debug(f"Logging initialized: {__name__}")
+
+    if args.config is None:
+        #print('need to specify machine configuration with "--config"', file=stderr)
+        logger.critical('need to specify machine configuration with "--config"')
+        sys.exit()
+
+    out_formatter = logging.Formatter('%(levelname)s\t%(message)s')
     """
         read machine config
     """
@@ -791,13 +832,21 @@ if __name__ == '__main__':
                     break
                 case other:
                     if not line[0].startswith('#') and line[0] != '\n':
-                        print(f"unrecognized config option: {line}")
+                        logger.info(f"unrecognized config option: {line}")
 
         for line in machineconf.readlines():
             if not line.startswith('#'):
                 command, desc = line.rstrip('\n').split('=')
                 valid_commands[command] = desc
-                #print("GOT COMMAND:",command,desc)
+                #logger.info("GOT COMMAND:",command,desc)
+
+    result = logging.getLogger(machine_name)    # TODO looks like this inherits from root logger because it seems to use handler_streamHandler that prints CRITICAL messages on stderr and always
+    f_handler = logging.FileHandler( machine_name+'.out' if args.out is None else args.out )
+    f_handler.setFormatter( out_formatter )
+    result.addHandler(f_handler)
+    result.setLevel(args.out_level)
+    result.info(f";{pendulum.now()}:Logging initialized for {machine_name}")
+
 
     # Validate GCODE input
     if args.gcode:
@@ -805,23 +854,24 @@ if __name__ == '__main__':
             if gcode is not None and os.path.exists(gcode):
                 if os.path.isfile(gcode):
                     if gcode.strip().lower().endswith(".gcode"):
-                        pass
+                        continue
                     else:
-                        print(f"{gcode} does not have .gcode extension.")
+                        logger.critical(f"{gcode} does not have .gcode extension.")
                         sys.exit()
                 else:
-                    print(f"{gcode} is not a file.")
+                    logger.info(f"{gcode} is not a file.")
                     sys.exit()
             elif gcode is not None:
-                print(f"{gcode} does not exist.")
+                logger.info(f"{gcode} does not exist.")
                 sys.exit()
 
-    print(BANNER)
+    for line in BANNER.split('\n'):
+        logger.info(line)
     try:
         termwidth = os.get_terminal_size().columns-1
     except OSError:
         termwidth = 80
-    print(f"""{termwidth*'='}
+    logger.info(f"""{termwidth*'='}
     Machine name: {machine_name}
     Port name: {serial_port}
     Baud rate: {baudrate}

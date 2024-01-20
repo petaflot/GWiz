@@ -42,7 +42,7 @@ G-Code Wizard is in early development stage.
 
 ![static/GWiz.jpg](static/GWiz.jpg)
 
-GWiz playing the Tetris theme while the use is searching for commands whose description contains the words terms `hot` and `tem`.
+GWiz playing the Tetris theme while the user is searching for commands whose description contains the words terms `hot` and `tem`.
 
 
 [^print]: prints or any other program sent to a machine
