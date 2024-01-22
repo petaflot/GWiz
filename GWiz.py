@@ -29,21 +29,20 @@ TODOs:
 - rs / Resend
 - busy:<reason>
 in general: https://reprap.org/wiki/G-code#Replies_from_the_RepRap_machine_to_the_host_computer
+https://reprap.org/wiki/G-code#Action_commands
 
 * allow read commands from pipe (or command ie. python)
-* color command in progress (the one on "top" of WIP pile)
 * use ':' to prefix command mode, sort-of like vim
-* python-formatted config?
-* automatic machine detection based on report from firmware
-* mouse control with XY, XZ, YZ plane selection and position reporting (mouse or from serial device)
-* automatically extract and cache G-Code command usage from https://raw.githubusercontent.com/MarlinFirmware/MarlinDocumentation/master/_gcode/
-* don't hang waiting for the printer to reply something when a lot of commands are in the pile!
+* python-format config?
+* automatic machine detection based on report UUID and machine name reported from firmware
+* automatically extract and cache G-Code command usage from https://raw.githubusercontent.com/MarlinFirmware/MarlinDocumentation/master/_gcode/ and list of commands when compiling firmware (requires Marlin patch)
+* don't hang waiting for the printer to reply something when a lot of commands are in the pile! (`force` ; must be fixed)
 * multiple gcode files on cmd line
 * parallel G-Code with z-based interpolation, partial cancel
-* display commands number (for history)
-* history: don't consider comments and status messages as commands
-* wip_ts, ack_ts
+* display commands number (for history) ; don't consider comments and status messages as commands
+* better coloring in piles ; color command in progress (the one on "top" of WIP pile)
 * don't redraw all internal widgets?
+* mouse control with XY, XZ, YZ plane selection and position reporting (mouse or from serial device)
 * also see inline TODOs
 
 Weird:
@@ -207,6 +206,7 @@ class ACKPile(WQueue):
                 elif item[1][0] in ('status_msg',):
                     # communication from printer ; can't be replayed as-is in gcode so we double-comment it
                     result.info(';; '+item[1][1].decode())
+                # 'echo:Cold extrudes are disabled (min temp 170C)' 'misc_status (//)'
                 else:
                     logger.info('??? '+str(item))
             else:
@@ -378,7 +378,7 @@ def read_from_serial(s):
                         tbars[label][1].set_completion(target)
                         tbars[label][2].set_completion(float(temp))
                     except (ValueError, IndexError) as e:
-                        logger.info(f"{E} (GJE72JDH): {bab.to_braille(reply)}")
+                        logger.info(f"{e} (GJE72JDH): {bab.to_braille(reply)}")
 
             # downshift commands if required (send to printer)
             if MACHINE_READY:
@@ -797,8 +797,10 @@ if __name__ == '__main__':
 
     parser.add_argument("-l", "--log", default = '/var/log/GWiz/GWiz.log', help="write log to file", metavar="file")
     parser.add_argument("--log-level", default = 'WARNING', help="log level", metavar="str")
+    # TODO doesn't seem to work with config file
     parser.add_argument("--log-mode", default = 'a', help="open log in mode [w|a]", metavar="str")
     parser.add_argument("-o", "--out", default = None, help="write machine I/O to file", metavar="file")
+
     parser.add_argument("--out-level", default = 'DEBUG', help="machine output level", metavar="str")
     parser.add_argument("--out-mode", default = 'w', help="open machine output file in mode [w|a]", metavar="str")
 
@@ -860,28 +862,27 @@ if __name__ == '__main__':
                         logger.critical(f"{gcode} does not have .gcode extension.")
                         sys.exit()
                 else:
-                    logger.info(f"{gcode} is not a file.")
+                    logger.critical(f"{gcode} is not a file.")
                     sys.exit()
             elif gcode is not None:
-                logger.info(f"{gcode} does not exist.")
+                logger.critical(f"{gcode} does not exist.")
                 sys.exit()
 
     for line in BANNER.split('\n'):
         logger.info(line)
-    try:
-        termwidth = os.get_terminal_size().columns-1
-    except OSError:
-        termwidth = 80
-    logger.info(f"""{termwidth*'='}
+    #try:
+    #    termwidth = os.get_terminal_size().columns-1
+    #except OSError:
+    termwidth = 80
+    for line in f"""{termwidth*'='}
     Machine name: {machine_name}
     Port name: {serial_port}
     Baud rate: {baudrate}
     G-Code: {args.gcode}
-{termwidth*'='}""")
-    SER = serial.Serial(serial_port, baudrate)
+{termwidth*'='}""".split('\n'):
+        logger.info(line)
 
-    #from time import sleep
-    #sleep(.5)
+    SER = serial.Serial(serial_port, baudrate)
 
     main(
         SER,
