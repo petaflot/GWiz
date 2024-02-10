@@ -21,7 +21,7 @@ G-Wiz makes it possible to alter parameters such as feedrate, extrusion ratio an
 
 Usage notes:
 - When searching for a command and only one choice remains, that command is automatically typed for you
-- In command mode, the right panel (here) shows command usage and parameters for the typed command
+- In command mode, the right panel (here) shows command usage and parameters for the typed command (TODO)
 - at the time of this writing, multiple gcodes are executed sequentially (no interpolation)
 """
 

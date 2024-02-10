@@ -32,6 +32,7 @@ in general: https://reprap.org/wiki/G-code#Replies_from_the_RepRap_machine_to_th
 https://reprap.org/wiki/G-code#Action_commands
 
 * allow read commands from pipe (or command ie. python)
+* allow '\n' in user input to send more than one command at once
 * use ':' to prefix command mode, sort-of like vim
 * python-format config?
 * automatic machine detection based on report UUID and machine name reported from firmware
@@ -43,7 +44,10 @@ https://reprap.org/wiki/G-code#Action_commands
 * better coloring in piles ; color command in progress (the one on "top" of WIP pile)
 * don't redraw all internal widgets?
 * mouse control with XY, XZ, YZ plane selection and position reporting (mouse or from serial device)
+* full power is 127%... not cool XD ; honor MAX_BED_POWER (must be set in config, if possible automatically when compiling firmware)
+* it turns out this entire thing is quite slow... on small segments the printer will stutter, we are no way near the 1MBPs on the serial connection.
 * also see inline TODOs
+* pause: do more than just stop to send instructions to the machine ; purge the WIP pile so we can continue sending instructions manually
 
 Weird:
 - Marlin ommits 'C:' prefix to coordinates?
@@ -51,7 +55,7 @@ Weird:
 
 loop, wai_pile, wip_pile, ack_pile, edit, machine_pos, messages, tbars, info_dic, machine_status, gcode_piles, watch_pipe, div, cmd_pile, all_wai, editmap = [None for _ in range(16)]
 PRINT_PAUSED = True
-MAX_COMMANDS_IN_WIP = 5
+MAX_COMMANDS_IN_WIP = 5#12
 # max lines to show in piles
 DISP_ACK_LEN = 30
 DISP_WAI_LEN = 10
@@ -161,6 +165,8 @@ class ACKPile(WQueue):
         if len((tup := args[0])) == 2:
             if tup[0] is not None:
                 try:
+                    if type(tup[0]) is pendulum.DateTime:
+                        return urwid.Columns([urwid.Text(f"OOPS: {tup[0]}")])
                     return urwid.Columns([
                             (TIME_LEN, urwid.Text( ('timestamp', tup[0][0].strftime(TIME_FMT)) )),
                             urwid.Text( tup[0][1] ),
@@ -171,7 +177,7 @@ class ACKPile(WQueue):
                     logger.info(f"IndexError ; full ACK message {tup[0]} --- {tup[1]}")
                     raise
                 except TypeError:
-                    logger.info(f"IndexError ; full ACK message {tup[0]} --- {tup[1]}")
+                    logger.info(f"TypError ; full ACK message {tup[0]} --- {tup[1]}")
                     raise
             else:
                 #logger.debug(f"no-ACK message {tup[0]} --- {tup[1]}")
@@ -437,11 +443,15 @@ def serial_comm_still_ok(data):
             try:
                 cmd_pile.contents = [ (w,('pack',None)) for w in [ ack_pile.widget, wip_pile.widget, all_wai, editmap ]]
                 break
+            except IndexError as e:
+                # deque index out of range
+                logger.warning(f"{e} (id:EH47SAJ3)")
+                break
             except RuntimeError as e:
                 if i == 10:
-                    logger.info(f"Warning (id:KCD4JD72G): {e} (message repeated 10 times)")
+                    logger.info(f"{e} (message repeated 10 times) (id:KCD4JD72G)")
                 else:
-                    logger.debug(f"Warning (id:KCD4JD72G): {e}")
+                    logger.debug(f"{e} (id:KCD4JD72F)")
                     i = 0
                 i += 1
                 sleep(.1)
@@ -470,7 +480,19 @@ commands_ack = [
     TODO put this in printer config
 """
 commands_wai = [
-    #b'M155 S1', # temperatures auto-report
+    b'M155 S1',                 # temperatures auto-report
+    #b'G28',                     # Home all axii
+    #b'G29 H270',                # get levelling mesh
+    #b'M420 S1',                # use bed leveling mesh ; needs EEPROM to work properly :-/
+    # retract/recover (will be set in firmware)
+    #b'M207 S1.5 F7200 Z1',    # firmware retraction
+    b'M208 S-.5',
+    b'M900 T0 L0.02',     # linear advance ; K set in firmware
+    b'M900 S0',
+    b'M900 S1',
+    # motion settings
+    #b'M201 X5000 Y3500 ; set max accel values',
+    #b'M203 X200 Y180 Z40 E6; set max feedrates',
 ]
 if len(commands_wai) > DISP_WAI_LEN:
     raise NotImplementedError
@@ -608,11 +630,12 @@ class UserInput(urwid.Padding):
                     match edit.edit_text:
                         case 'run':
                             PRINT_PAUSED = False
+                            wai_pile.append(b'M75 ; Print Job Timer start', 0)  # see also PRINTJOB_TIMER_AUTOSTART
                         case 'pause':
                             PRINT_PAUSED = True
                         case 'force':
-                            wip_pile.append(b'caca')
-                            logger.debug("appended 'caca' to wip_pile")
+                            wip_pile.append(b'NOP')
+                            logger.debug("appended 'NOP' to wip_pile")  # TODO this is not the correct way to do it!
                         case 'debug':
                             logger.debug(ack_pile)
                             logger.debug(wip_pile)
@@ -705,16 +728,16 @@ def main(SER, machine_name, serial_port, maxtempi, gcodes):
     #from time import sleep
     #sleep(2)
 
-    ack_pile = ACKPile( 'ACK Pile', commands_ack, display_size = DISP_ACK_LEN, color = 'acked' )
-    wip_pile = WIPPile( 'Processing...', max_content_len = MAX_COMMANDS_IN_WIP, color = 'wip' )   # this is WIP pile, instructions have been sent to the machine but not acked yet
-    wai_pile = WQueue( 'User input pile', commands_wai, display_size = DISP_WAI_LEN, viewport_start = 0 )
+    ack_pile = ACKPile( 'ACK Pile', commands_ack, display_size=DISP_ACK_LEN, color='acked' )
+    wip_pile = WIPPile( 'Processing...', max_content_len=MAX_COMMANDS_IN_WIP, display_size=MAX_COMMANDS_IN_WIP, color='wip' )   # this is WIP pile, instructions have been sent to the machine but not acked yet
+    wai_pile = WQueue( 'User input pile', commands_wai, display_size=DISP_WAI_LEN, viewport_start=0 )
 
     gcode_piles = {}
     if gcodes:
         for gcode in gcodes:
             logger.info(f"Loading file: {gcode}")
             with open(gcode,'rb') as g:
-                gcode_piles[gcode] = WQueue( gcode, [line.rstrip(b'\n').replace(b'\t', b' ') for line in g.readlines() if line != b'\n'], display_size = DISP_WAI_LEN, viewport_start = 0 )
+                gcode_piles[gcode] = WQueue( gcode, [line.rstrip(b'\n').replace(b'\t', b' ') for line in g.readlines() if line != b'\n'], display_size=DISP_WAI_LEN, viewport_start=0 )
         #logger.info(gcode_piles[gcode])
         #logger.info(gcode_piles[gcode].widget.contents)
 
@@ -796,7 +819,7 @@ if __name__ == '__main__':
     parser.add_argument("-b", "--baudrate", default = None, type=int, help="baud rate override", metavar="int")
 
     parser.add_argument("-l", "--log", default = '/var/log/GWiz/GWiz.log', help="write log to file", metavar="file")
-    parser.add_argument("--log-level", default = 'WARNING', help="log level", metavar="str")
+    parser.add_argument("--log-level", default = None, help="log level", metavar="str")
     # TODO doesn't seem to work with config file
     parser.add_argument("--log-mode", default = 'a', help="open log in mode [w|a]", metavar="str")
     parser.add_argument("-o", "--out", default = None, help="write machine I/O to file", metavar="file")
@@ -806,7 +829,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     
-    logger.setLevel(args.log_level)
+    if args.log_level:
+        logger.setLevel(args.log_level)
     logger.debug(f"Logging initialized: {__name__}")
 
     if args.config is None:
