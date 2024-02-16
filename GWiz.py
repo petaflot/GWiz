@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # vim: number
 from __future__ import annotations  # NOTE: what does this actually do?
 import os
@@ -14,7 +14,10 @@ except ImportError:
     raise Exception("module 'pyserial' is required")
 
 import urwid
-import bytes_as_braille as bab
+try:
+    import bytes_as_braille as bab
+except RuntimeError as e:
+    logger.error("not using bytes_as_braille ({e})")
 from collections import deque
 from time import sleep
 from proghelp import *
@@ -66,11 +69,11 @@ class FormatError(Exception): pass
 watch_pipe_error = (urwid.Text(('error','OSError on watch_pipe ; display refresh will suffer')), ('pack',None))
 
 import pendulum
-#TIME_FMT = "%Y-%m-%d %H:%M:%S"
-TIME_FMT = "%H:%M:%S.%s"
+TIME_FMT = "%Y-%m-%d %H:%M:%S"
+#TIME_FMT = "%H:%M:%S.%s"
 TIME_LEN = len(pendulum.now().strftime(TIME_FMT))+1
 
-# the list of commands that the machine supports
+# the list of commands that the machine supports ; populated later
 valid_commands = {}
 
 class WQueue:
@@ -717,7 +720,7 @@ def search_and_highlight( needle, stack, widget = tuple, target = print ):
         target( widget( (cmd, desc) ) )
 
 
-def main(SER, machine_name, serial_port, maxtempi, gcodes):
+def main(SER, machine_name, serial_port, maxtemp, gcodes):
     global loop, edit, ack_pile, wip_pile, wai_pile, machine_pos, messages, tbars, info_dic, watch_pipe, machine_status, gcode_piles, div, cmd_pile, all_wai, editmap
 
     from threading import Thread
@@ -818,14 +821,14 @@ if __name__ == '__main__':
     parser.add_argument("-p", "--port", default = None, help="serial port override", metavar="device")
     parser.add_argument("-b", "--baudrate", default = None, type=int, help="baud rate override", metavar="int")
 
-    parser.add_argument("-l", "--log", default = '/var/log/GWiz/GWiz.log', help="write log to file", metavar="file")
     parser.add_argument("--log-level", default = None, help="log level", metavar="str")
     # TODO doesn't seem to work with config file
-    parser.add_argument("--log-mode", default = 'a', help="open log in mode [w|a]", metavar="str")
-    parser.add_argument("-o", "--out", default = None, help="write machine I/O to file", metavar="file")
+    #parser.add_argument("-l", "--log", default = '/var/log/GWiz/GWiz.log', help="write log to file", metavar="file")
+    #parser.add_argument("--log-mode", default = 'a', help="open log in mode [w|a]", metavar="str")
 
+    parser.add_argument("-o", "--out", default = None, help="write machine I/O to file", metavar="file")
     parser.add_argument("--out-level", default = 'DEBUG', help="machine output level", metavar="str")
-    parser.add_argument("--out-mode", default = 'w', help="open machine output file in mode [w|a]", metavar="str")
+    #TODO parser.add_argument("--out-mode", default = 'w', help="open machine output file in mode [w|a]", metavar="str")
 
     args = parser.parse_args()
     
