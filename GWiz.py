@@ -22,6 +22,8 @@ from collections import deque
 from time import sleep
 from proghelp import *
 
+EXTRA_DEBUG = False
+
 """
 TODOs:
 
@@ -34,6 +36,7 @@ TODOs:
 in general: https://reprap.org/wiki/G-code#Replies_from_the_RepRap_machine_to_the_host_computer
 https://reprap.org/wiki/G-code#Action_commands
 
+* commands added to "User input pile" not on the bottom, but on top!
 * allow read commands from pipe (or command ie. python)
 * allow '\n' in user input to send more than one command at once
 * use ':' to prefix command mode, sort-of like vim
@@ -276,7 +279,7 @@ def pop_to_serial(s, pile):
     # strip comments and invalid commands
     if not cmd.strip().startswith(b';') and not cmd.isspace() and len(cmd) > 0:
         s.write((cmd+b'\n'))
-        logger.debug(f">>> {cmd}")
+        if EXTRA_DEBUG: logger.debug(f">>> {cmd}")
 
 
 """
@@ -306,9 +309,10 @@ def read_from_serial(s):
     try:
         while True:
             reply = s.readline().rstrip(b'\n')
-            logger.debug(f"<<< {reply}")
+            if EXTRA_DEBUG: logger.debug(f"<<< {reply}")
             try:
                 if reply.startswith(b'ok'):
+                    skip = False
                     while True:
                         try:
                             if (last_wip_command_with_ts := wip_pile.pop(0))[1].startswith(b';'):
@@ -320,21 +324,23 @@ def read_from_serial(s):
                         #    #raise
                         #    break
                         except IndexError:
-                            logger.warning("read_from_serial(): received '{reply}' but queue was empty")
+                            logger.warning(f"read_from_serial(): received '{reply}' but queue was empty")
+                            skip = True
                             break
                             
-                    try:
-                        if last_wip_command_with_ts[1] == cmd_errors[0]:
-                            ack_pile.append( (last_wip_command_with_ts, ('error','Unknown command') ), '1')
-                            cmd_errors.popleft()
-                        else:
-                            raise IndexError
-                    except IndexError:
-                        # normal command here, nothing special
-                        # TODO it would be nice to split and color trailing comments
-                        #logger.info('whoops', last_wip_command_with_ts)
-                        ack_pile.append( (last_wip_command_with_ts, ('ack_msg',reply)), '2' )
-                        # TODO update position if last command is one of G0-G5 ?
+                    if not skip:
+                        try:
+                            if last_wip_command_with_ts[1] == cmd_errors[0]:
+                                ack_pile.append( (last_wip_command_with_ts, ('error','Unknown command') ), '1')
+                                cmd_errors.popleft()
+                            else:
+                                raise IndexError
+                        except IndexError:
+                            # normal command here, nothing special
+                            # TODO it would be nice to split and color trailing comments
+                            #logger.info('whoops', last_wip_command_with_ts)
+                            ack_pile.append( (last_wip_command_with_ts, ('ack_msg',reply)), '2' )
+                            # TODO update position if last command is one of G0-G5 ?
                     #except TypeError:
                     #    logger.info("read_from_serial(): queue was empty! [2]")
                     #    #raise
@@ -396,7 +402,7 @@ def read_from_serial(s):
 
                 if not PRINT_PAUSED:
                     for gco_pile in gcode_piles.keys():
-                        logger.debug(f"flushing pile {gco_pile}")
+                        if EXTRA_DEBUG: logger.debug(f"flushing pile {gco_pile}")
                         while len(gcode_piles[gco_pile]) and not wip_pile.is_saturated:
                             #logger.info(f"will pop {gcode_piles[gco_pile].content[0]}")
                             pop_to_serial(s, gcode_piles[gco_pile] )
@@ -488,11 +494,14 @@ commands_wai = [
     #b'G29 H270',                # get levelling mesh
     #b'M420 S1',                # use bed leveling mesh ; needs EEPROM to work properly :-/
     # retract/recover (will be set in firmware)
-    #b'M207 S1.5 F7200 Z1',    # firmware retraction
-    b'M208 S-.5',
-    b'M900 T0 L0.02',     # linear advance ; K set in firmware
-    b'M900 S0',
-    b'M900 S1',
+    # ABS
+    #b'M207 S1.45 F2500 Z1',    # firmware retraction
+    #b'M208 S-.5 F6000',
+   
+    b'M900 T0 L0.02',     # linear advance ; incompatible with step-daemon
+    b'M900 T0 S0',
+    #b'M900 T0 S1',
+
     # motion settings
     #b'M201 X5000 Y3500 ; set max accel values',
     #b'M203 X200 Y180 Z40 E6; set max feedrates',

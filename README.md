@@ -18,6 +18,8 @@ This repository also include a command-line utility `gp` to pipe gcode from file
 
 GWiz sort-of competes with [pronsole](https://github.com/kliment/Printrun) but it aims to be lighter, more flexible, more user-friendly. GWiz requires very few dependencies and uses [urwid](http://urwid.org/) as a toolkit, which allows a GUI-like feeling in a terminal or remote shell (ssh).
 
+At the moment, resources used are still pretty high ; typically, a CB1 can be too slow to send instructions for production use (heavy stutter when there is a succession of short paths).
+
 This program moves gcode instructions from the developper's mind (or G-Code file, pile 'zero') sequentially to a number of other piles:
 
 - *WAIT* pile: instructions that are scheduled to be sent to the machine, but the machine's buffer is full (or we artificially throttle them[^throttle])
