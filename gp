@@ -5,44 +5,123 @@ import serial
 from threading import Thread
 import logging
 import logging.config
+from sys import exit
 logging.config.fileConfig(fname='logging.ini', disable_existing_loggers=False)
 logger = logging.getLogger('stderrLogger')
 
-BUFFSIZE = 0
+# TODO allow overring these values in printer config
 PORT_AUTODETECT = '/dev/ttyACM', '/dev/ttyUSB'
-TIMEOUT = 5
+SERIAL_TIMEOUT = 10
+BUFFER_FULL_WAIT = .1
+# set this to the queue size if ADVANCED_OK is not set, else False
+ADVANCED_OK_WORKAROUND = False
 
-def serial_read(s,buffsize):
+
+BUFFER_DEBUG = {'P': None, 'B': None, 'Pstarve': 0}
+# gets set to True when the last command has been ACKed
+WAIT_AND_QUIT = False
+# current buffer usage
+# None: machine not ready
+# int: free slots
+# False: waiting for completion of terminating M400
+# True: will call exit() soon
+BUFFSIZE = None
+# None: print not started (M77)
+# True: print started (M75)
+# False: print paused (M76)
+PRINT_STARTED = None
+
+def serial_read(ser):
     global BUFFSIZE
 
     while True:
-        reply = s.readline().decode().strip()
+        reply = ser.readline().decode().strip()
         if reply.startswith('ok'):
-            result.debug(reply)
-            BUFFSIZE += 1
+            reply = reply.split(' ')[1:]
+            try:
+                BUFFER_DEBUG['P'] = int(reply[0].lstrip('P'))
+                if BUFFER_DEBUG['P'] > BUFFER_DEBUG['Pstarve']:
+                    # setting the starvation limit for planner buffer ; should only happen once
+                    BUFFER_DEBUG['Pstarve'] = BUFFER_DEBUG['P']
+                    logger.info(f"planner buffer starvation threshold set to {BUFFER_DEBUG['P']}")
+                elif BUFFER_DEBUG['P'] == BUFFER_DEBUG['Pstarve']:
+                    if PRINT_STARTED:
+                        logger.info(f"planner buffer is starving (host too slow? try decreasing {BUFFER_FULL_WAIT=})")
+            except ValueError:
+                logger.error(f"could not extract 'P' from {reply}")
+            try:
+                BUFFER_DEBUG['B'] = int(reply[1].lstrip('B'))
+                if BUFFSIZE is None:
+                    BUFFSIZE = BUFFER_DEBUG['B']
+                    # TODO confirm readiness by playing a tune and/or blinking LEDs, useful to identify printer when there many -> in printer config
+                #elif BUFFSIZE is False and WAIT_AND_QUIT:
+                #    BUFFSIZE = True
+                    
+                #elif BUFFSIZE != BUFFER_DEBUG['B']:
+                #    logger.warning(f"buffer discrepancy: {BUFFER_DEBUG['B']=}, {BUFFSIZE=}")
+            except ValueError:
+                logger.error(f"ValueError: could not extract 'B' from {reply}")
+            except IndexError:
+                logger.error(f"IndexError: could not extract 'B' from {reply}")
+                
+
+            #if WAIT_AND_QUIT:
+            #    print(f"{BUFFSIZE} {BUFFER_DEBUG['B']}")
+            #    # this is pretty flaky...
+            #    if BUFFSIZE == BUFFER_DEBUG['B']:
+            #        result.critical(f"quitting soon {reply}")
+            #        BUFFSIZE = True
+            if BUFFSIZE >= 0:
+                #result.debug(reply)
+                BUFFSIZE += 1
+            else:
+                result.warn(f"received '{reply}' but machine was not ready and no command was sent by this instance")
             continue
         elif reply.startswith('echo:busy: processing'):
             result.debug(reply)
-            continue
-        elif reply in ('start', 'pages_ready'):
-            result.info(reply)
-            BUFFSIZE = buffsize
+        elif reply.startswith( ('T:', 'X:') ):
+            print(reply)
         elif reply.startswith( ('echo', '//') ):
-            result.info(reply)
-        elif reply.startswith('Error'): # TODO not the correct string
-            result.error(reply)
+            if reply.startswith('echo:Unknown command:'):
+                result.error(reply)
+            else:
+                result.info(reply)
+        elif BUFFSIZE is None and (reply in ('start', 'pages_ready', 'wait') or reply.startswith( ( 'T:', ) )):
+            result.info(f"machine ready ({reply})")
+            if not ADVANCED_OK_WORKAROUND:
+                ser.write(b'G4\n')
+                result.debug('G4; dwell for no time just so we get a clue of the queue size')
+            else:
+                BUFFSIZE = ADVANCED_OK_WORKAROUND
+
+            #if WAIT_AND_QUIT and BUFFSIZE is False:
+            #    BUFFSIZE = True
+        elif reply == 'wait':
+            #if WAIT_AND_QUIT:
+            #    print(BUFFSIZE)
+            #    result.debug(f"host quitting soon")
+            #    BUFFSIZE -= 1
+            #    ser.write(b'M400\n')
+            #    result.debug('M400 ; wait for moves to finish')
+            #    BUFFSIZE -= 1
+            #    ser.write(b'M300 S437 P1000\n')
+            #    result.debug('M300 ... ; play a tune')
+            #else:
+            result.debug(reply)
+        elif reply.startswith('Error:'):
+            logger.error(reply)
         #elif ...   # TODO fatal messages (machine halts)
         #    result.fatal(reply)
         #    logger.fatal(reply)
-        #    quit program
+        #    exit()
         else:
             result.warning(reply)
 
 
 async def main( ser, args, gcodes ):
-    global BUFFSIZE
+    global BUFFSIZE#, WAIT_AND_QUIT
 
-    t = Thread(target=serial_read, args=(ser,args.buffsize), daemon = True )
+    t = Thread(target=serial_read, args=(ser,), daemon = True )
     t.start()
 
     await asyncio.sleep(1)
@@ -53,28 +132,41 @@ async def main( ser, args, gcodes ):
             return file
 
     for input_file in gcodes:
+        logger.info(f"piping gcode from {input_file}")
         with _open(input_file) as gcode:
             for line in gcode.readlines():
                 if not line.startswith(';'):
                     cmd = line.split(';',1)[0].strip().rstrip(' ')
                     if len(cmd):
                         while True:
-                            if BUFFSIZE:
-                                BUFFSIZE -= 1
-                                logger.debug(f"{BUFFSIZE}\t>>> {cmd}")
-                                ser.write(bytes(cmd,args.encoding)+b'\n')
-                                break
-                            else:
-                                await asyncio.sleep(.1)
-                elif line.startswith(";:"):
-                    # TODO special directives to tell program to quit or sleep or ...
-                    #asyncio.sleep(specified timeout)
-                    sys.exit()
+                            try:
+                                if BUFFSIZE > 0:
+                                    BUFFSIZE -= 1
+                                    logger.debug(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\t{BUFFSIZE}\t>>>{cmd}<<<")
+                                    if cmd == 'M75':
+                                        PRINT_STARTED = True
+                                    elif cmd == 'M76':
+                                        PRINT_STARTED = False
+                                    elif cmd == 'M77':
+                                        PRINT_STARTED = None
+                                    ser.write(bytes(cmd,args.encoding)+b'\n')
+                                    break
+                                else:
+                                    await asyncio.sleep(BUFFER_FULL_WAIT)
+                            except TypeError:
+                                await asyncio.sleep(BUFFER_FULL_WAIT)
                 else:
-                    result.debug(line)
+                    result.debug(line.strip())
+    #WAIT_AND_QUIT = True
+    #
+    #logger.debug(f"no gcode left, waiting for machine to finish")
+    #while type(BUFFSIZE) is int and BUFFSIZE is not True:
+    #    await asyncio.sleep(BUFFER_FULL_WAIT)
+        #print(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\t{BUFFSIZE}")
+        #await asyncio.sleep(1)
 
-    logging.debug(f"gcode finished, quitting in {args.timeout}[s]")
-    await asyncio.sleep(args.timeout)
+    logger.info(f"all done, (how) ex(c)iting!")
+    exit()
 
 if __name__ == '__main__':
     import argparse
@@ -86,8 +178,7 @@ if __name__ == '__main__':
     parser.add_argument("-c", "--config", help="machine configuration", default = None, metavar="file")
     parser.add_argument("-p", "--port", default = None, help="serial port override", metavar="device")
     parser.add_argument("-b", "--baudrate", default = None, type=int, help="baudrate override", metavar="int")
-    parser.add_argument("-t", "--timeout", default = TIMEOUT, type=int, help="serial timeout ({TIMEOUT} [s])", metavar="int")
-    parser.add_argument("-B", "--buffsize", default = 15, type=int, help="machine buffer size", metavar="int")
+    parser.add_argument("-t", "--timeout", default = SERIAL_TIMEOUT, type=int, help="serial timeout ({SERIAL_TIMEOUT} [s])", metavar="int")
     parser.add_argument("-e", "--encoding", default = 'utf8', type=str, help="encoding to use when sending to the machine (utf8)", metavar="str")
 
     parser.add_argument("-g", "--gcode", help="gcode to preload (can be specified multiple times)", default = None, metavar="file", nargs='*')
@@ -111,7 +202,7 @@ if __name__ == '__main__':
 
     ser = serial.Serial(timeout=args.timeout)
 
-    out_formatter = logging.Formatter('%(message)s')
+    out_formatter = logging.Formatter('%(levelname)s:%(message)s')
     if args.config is not None:
         #out_formatter = logging.Formatter('%(levelname)s\t%(message)s')    # keep for debugging..
         """
@@ -141,7 +232,7 @@ if __name__ == '__main__':
         machine_name = "machine"
         if args.port is None:
             # TODO auto-detection 
-            raise NotImplementedError
+            raise NotImplementedError("No serial sport specified")
         else:
             ser.port = args.port
         ser.baudrate = args.baudrate
@@ -169,13 +260,13 @@ if __name__ == '__main__':
                         continue
                     else:
                         logger.critical(f"{gcode} does not have .gcode or .g extension.")
-                        sys.exit()
+                        exit()
                 else:
                     logger.critical(f"{gcode} is not a file.")
-                    sys.exit()
+                    exit()
             elif gcode is not None:
                 logger.critical(f"{gcode} does not exist.")
-                sys.exit()
+                exit()
             logger.debug(f"adding gcode file: {gcode}")
         gcodes = args.gcode
     else:
@@ -189,5 +280,8 @@ if __name__ == '__main__':
     except serial.serialutil.SerialException:
         logger.fatal(f"could not open {ser.port}")
     else:
-        asyncio.run(main( ser, args, gcodes ))
+        try:
+            asyncio.run(main( ser, args, gcodes ))
+        except KeyboardInterrupt:
+            logger.fatal(f"aborted by user (ctrl+c)")
 

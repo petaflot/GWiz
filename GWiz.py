@@ -324,7 +324,7 @@ def read_from_serial(s):
                         #    #raise
                         #    break
                         except IndexError:
-                            logger.warning(f"read_from_serial(): received '{reply}' but queue was empty")
+                            logger.info(f"read_from_serial(): received '{reply}' but queue was empty")
                             skip = True
                             break
                             
