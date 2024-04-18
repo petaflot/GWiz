@@ -7,7 +7,7 @@ GWiz is an advanced gcode *"man-in-the-middleware"* that aims to make it comfort
 
 ## gp
 
-This repository also include a command-line utility `gp` to pipe gcode from files or stdin to a machine ; unlike most similar utilities that can be found at the time of this writing, `gp` doesn't use the naive approach of *"I send a command and wait for an answer before sending the next command"* but instead uses threading for async read/writes. Unlike most similar utilies available, `gp` actually works.
+This repository also include a command-line utility `gp` to pipe gcode from files or stdin to a machine ; unlike most similar utilities that can be found at the time of this writing, `gp` doesn't use the naive approach of *"I send a command and wait for an answer before sending the next command"* but instead uses threading for async read/writes. Still, `gp` doesn't actually work yet (it is likely to just stop the print anytime) so don't use it for production.
 
 ### TODO
 
