@@ -36,6 +36,7 @@ TODOs:
 in general: https://reprap.org/wiki/G-code#Replies_from_the_RepRap_machine_to_the_host_computer
 https://reprap.org/wiki/G-code#Action_commands
 
+* force sending M108, M112, M410, M876 even if buffer throttling active (EMERGENCY_PARSER)
 * commands added to "User input pile" not on the bottom, but on top!
 * allow read commands from pipe (or command ie. python)
 * allow '\n' in user input to send more than one command at once

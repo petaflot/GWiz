@@ -9,10 +9,10 @@ from sys import exit
 logging.config.fileConfig(fname='logging.ini', disable_existing_loggers=False)
 logger = logging.getLogger('stderrLogger')
 
-# TODO allow overring these values in printer config
-PORT_AUTODETECT = '/dev/ttyACM', '/dev/ttyUSB'
-SERIAL_TIMEOUT = 10
-BUFFER_FULL_WAIT = .1
+# TODO allow overring these values in printer config (configs/*.conf)
+PORT_AUTODETECT = '/dev/ttyACM', '/dev/ttyUSB'	# TODO not used
+SERIAL_TIMEOUT = 10	# TODO not used
+BUFFER_FULL_WAIT = .01	# This will depend on prints... for a lot of details, lower this value
 # set this to the queue size if ADVANCED_OK is not set, else False
 ADVANCED_OK_WORKAROUND = False
 
@@ -40,7 +40,7 @@ def serial_read(ser):
 			try:
 				reply = reply.split(' ')[1:]
 				try:
-					BUFFER_DEBUG['P'] = int(reply[0].lstrip('P'))
+					BUFFER_DEBUG['P'] = int(reply[0].lstrip('P'))   # retrieving current machine buffer status
 					if BUFFER_DEBUG['P'] > BUFFER_DEBUG['Pstarve']:
 						# setting the starvation limit for planner buffer ; should only happen once
 						BUFFER_DEBUG['Pstarve'] = BUFFER_DEBUG['P']
@@ -87,6 +87,7 @@ def serial_read(ser):
 		elif reply.startswith('echo:busy: processing'):
 			result.debug(reply)
 		elif reply.startswith( ('T:', 'X:') ):
+			# temperature and position reports
 			print(reply)
 		elif reply.startswith( ('echo', '//') ):
 			if reply.startswith('echo:Unknown command:'):
@@ -104,6 +105,9 @@ def serial_read(ser):
 			#if WAIT_AND_QUIT and BUFFSIZE is False:
 			#	BUFFSIZE = True
 		elif reply == 'wait':
+			if BUFFER_DEBUG['P'] > 0:
+				print(f"was waiting in vain, updated buffer info! ({BUFFER_DEBUG['P']} -> {BUFFER_DEBUG['Pstarve']})")
+				BUFFER_DEBUG['P'] = BUFFER_DEBUG['Pstarve']
 			#if WAIT_AND_QUIT:
 			#	print(BUFFSIZE)
 			#	result.debug(f"host quitting soon")
@@ -156,6 +160,7 @@ async def main( ser, args, gcodes ):
 										PRINT_STARTED = False
 									elif cmd == 'M77':
 										PRINT_STARTED = None
+									print(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\tC:{BUFFSIZE}\t>>>{cmd}<<<")
 									ser.write(bytes(cmd,args.encoding)+b'\n')
 									break
 								else:
