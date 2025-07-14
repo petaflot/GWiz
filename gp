@@ -1,5 +1,13 @@
 #!/usr/bin/env python
 
+# TODO: maybe get rid of BUFFSIZE altogether (forget increment/decrement), and test BUFFER_DEBUG['B'] instead in main()? BUFFSIZE_INIT is required when 'wait' messages are received (and can be renamed to BUFFSIZE)
+# 2025-07-01 22:33:22,185:GWiz:ERROR:ValueError: could not extract 'B' from ['P0', 'B3wait']
+
+# TODO: use "estimated printing time" (read gcode file from end!, or patch prusa slicer)
+# TODO: don't use 'GWiz' prefix in log!
+
+WAITING_FOR_SO_LONG=0
+
 import asyncio
 import serial
 from threading import Thread
@@ -9,10 +17,13 @@ from sys import exit
 logging.config.fileConfig(fname='logging.ini', disable_existing_loggers=False)
 logger = logging.getLogger('stderrLogger')
 
+from time import sleep	# TODO cleanup! see BUFFER_EMPTY_WAIT
+
 # TODO allow overring these values in printer config (configs/*.conf)
 PORT_AUTODETECT = '/dev/ttyACM', '/dev/ttyUSB'	# TODO not used
 SERIAL_TIMEOUT = 10	# TODO not used
 BUFFER_FULL_WAIT = .01	# This will depend on prints... for a lot of details, lower this value
+BUFFER_EMPTY_WAIT = .5	# in case buffer count goes wrong and printer sends "wait" signals
 # set this to the queue size if ADVANCED_OK is not set, else False
 ADVANCED_OK_WORKAROUND = False
 
@@ -26,13 +37,14 @@ WAIT_AND_QUIT = False
 # False: waiting for completion of terminating M400
 # True: will call exit() soon
 BUFFSIZE = None
+BUFFSIZE_INIT = None
 # None: print not started (M77)
 # True: print started (M75)
 # False: print paused (M76)
 PRINT_STARTED = None
 
 def serial_read(ser):
-	global BUFFSIZE
+	global BUFFSIZE, BUFFSIZE_INIT
 
 	while True:
 		reply = ser.readline().decode().strip()
@@ -60,13 +72,23 @@ def serial_read(ser):
 						# TODO confirm readiness by playing a tune and/or blinking LEDs, useful to identify printer when there many -> in printer config
 					#elif BUFFSIZE is False and WAIT_AND_QUIT:
 					#	BUFFSIZE = True
+						BUFFSIZE_INIT = BUFFER_DEBUG['B']	# NOTE: workaround to missed BUFFSIZE increments
+						logger.info(f"set {BUFFSIZE_INIT=}")
 
+					# NOTE: this happens quite a lot.. but why?
+					# TODO: print error count/ratio?
 					#elif BUFFSIZE != BUFFER_DEBUG['B']:
-					#	logger.warning(f"buffer discrepancy: {BUFFER_DEBUG['B']=}, {BUFFSIZE=}")
+					#	logger.warning(f"buffer discrepancy: {BUFFER_DEBUG['B']=}, {BUFFSIZE=}, ({BUFFER_DEBUG=})")
 				except ValueError:
 					logger.error(f"ValueError: could not extract 'B' from {reply}")
 				except IndexError:
-					logger.error(f"IndexError: could not extract 'B' from {reply}")
+					try:
+						BUFFER_DEBUG['B'] = int(reply[0].lstrip('B'))
+						logger.info(f"extracted 'B' from {reply} (with errors)")
+					except:
+						logger.error(f"IndexError: could not extract 'B' from {reply}")
+					finally:
+						logger.info(f"serial (or Marlin?) bug: reply={'ok '+' '.join(reply)}")
 
 
 			#if WAIT_AND_QUIT:
@@ -77,7 +99,8 @@ def serial_read(ser):
 			#		BUFFSIZE = True
 			except Exception as e:
 				logger.error(f"ERROR: XHFJ5JS8 {e}: {reply}")
-			else:
+			#else:
+			finally:	# NOTE: `finally:` instead of `else:` may fix the missing BUFFSIZE increments!
 				if BUFFSIZE >= 0:
 					#result.debug(reply)
 					BUFFSIZE += 1
@@ -85,10 +108,13 @@ def serial_read(ser):
 					result.warn(f"received '{reply}' but machine was not ready and no command was sent by this instance")
 					continue
 		elif reply.startswith('echo:busy: processing'):
+			WAITING_FOR_SO_LONG=0
 			result.debug(reply)
 		elif reply.startswith( ('T:', 'X:') ):
 			# temperature and position reports
 			print(reply)
+			# TODO use W value from T:189.79 /198.00 B:31.18 /70.00 @:127 B@:127 W:? and adapt "WAITING_FOR_SO_LONG"
+
 		elif reply.startswith( ('echo', '//') ):
 			if reply.startswith('echo:Unknown command:'):
 				result.error(reply)
@@ -101,23 +127,20 @@ def serial_read(ser):
 				result.debug('G4; dwell for no time just so we get a clue of the queue size')
 			else:
 				BUFFSIZE = ADVANCED_OK_WORKAROUND
-
-			#if WAIT_AND_QUIT and BUFFSIZE is False:
-			#	BUFFSIZE = True
 		elif reply == 'wait':
-			if BUFFER_DEBUG['P'] > 0:
-				print(f"was waiting in vain, updated buffer info! ({BUFFER_DEBUG['P']} -> {BUFFER_DEBUG['Pstarve']})")
-				BUFFER_DEBUG['P'] = BUFFER_DEBUG['Pstarve']
-			#if WAIT_AND_QUIT:
-			#	print(BUFFSIZE)
-			#	result.debug(f"host quitting soon")
-			#	BUFFSIZE -= 1
-			#	ser.write(b'M400\n')
-			#	result.debug('M400 ; wait for moves to finish')
-			#	BUFFSIZE -= 1
-			#	ser.write(b'M300 S437 P1000\n')
-			#	result.debug('M300 ... ; play a tune')
-			#else:
+			# NOTE: 'wait' means buffer is empty!!
+			# NOTE: we shouldn't actually *need* the 'wait' messages (like in GWiz) except for the missed BUFFSIZE increments from time to time!!
+
+			# NOTE: this condition seems wrong..
+			#if BUFFER_DEBUG['P'] > 0 and BUFFSIZE>BUFFSIZE_INIT:
+				#print(f"was waiting in vain, updated buffer info! ({BUFFER_DEBUG['P']} -> {BUFFER_DEBUG['Pstarve']}, resetting {BUFFSIZE=} to {BUFFER_DEBUG['B']=}")
+				#logger.info(f"was waiting in vain, updated buffer info! ({BUFFER_DEBUG['P']} -> {BUFFER_DEBUG['Pstarve']}, resetting {BUFFSIZE=} to {BUFFSIZE_INIT=} ({BUFFER_DEBUG['B']=})")
+				# TODO try removing this (?) and see if prints fail!
+				#BUFFER_DEBUG['P'] = BUFFER_DEBUG['Pstarve']
+			if BUFFSIZE == 0:
+				logger.info(f"was waiting in vain, resetting BUFFSIZE ({BUFFER_DEBUG=})")
+				# TODO try removing this and see if prints fail! NOTE: if BUFFSIZE is dropped, we may still need BUFFSIZE_INIT here (in case of errors extracting 'B')
+				BUFFSIZE = BUFFER_DEBUG['B']
 			result.debug(reply)
 		elif reply.startswith('Error:'):
 			logger.error(reply)
@@ -130,9 +153,10 @@ def serial_read(ser):
 
 
 async def main( ser, args, gcodes ):
-	global BUFFSIZE#, WAIT_AND_QUIT
+	global BUFFSIZE, BUFFSIZE_INIT#, WAIT_AND_QUIT
+	global WAITING_FOR_SO_LONG
 
-	t = Thread(target=serial_read, args=(ser,), daemon = True )
+	t = Thread(target=serial_read, args=(ser,), daemon = True )	# TODO use asyncio task, not Thread!
 	t.start()
 
 	await asyncio.sleep(1)
@@ -153,18 +177,31 @@ async def main( ser, args, gcodes ):
 							try:
 								if BUFFSIZE > 0:
 									BUFFSIZE -= 1
-									logger.debug(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\t{BUFFSIZE}\t>>>{cmd}<<<")
+									logger.debug(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\tB':{BUFFSIZE}\t>>>{cmd}<<<")
 									if cmd == 'M75':
 										PRINT_STARTED = True
 									elif cmd == 'M76':
 										PRINT_STARTED = False
 									elif cmd == 'M77':
 										PRINT_STARTED = None
-									print(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\tC:{BUFFSIZE}\t>>>{cmd}<<<")
+									print(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\tB':{BUFFSIZE}\t{cmd}")
 									ser.write(bytes(cmd,args.encoding)+b'\n')
+									WAITING_FOR_SO_LONG = 0
 									break
-								else:
+								elif BUFFER_DEBUG['B'] == 0:
 									await asyncio.sleep(BUFFER_FULL_WAIT)
+								else:
+									WAITING_FOR_SO_LONG-=1
+									if WAITING_FOR_SO_LONG >= 1000:
+										logger.warning(f"resetting {BUFFSIZE=} to {BUFFER_DEBUG['B']=}")
+										BUFFSIZE = BUFFER_DEBUG['B']
+										WAITING_FOR_SO_LONG = 0
+									try:
+										await asyncio.sleep(BUFFER_FULL_WAIT)
+									except KeyboardInterrupt:
+										await asyncio.sleep(1)
+										logger.error("BUFFSIZE: user manual reset (KeyboardInterrupt)")
+										BUFFSIZE = BUFFSIZE_INIT
 							except TypeError:
 								await asyncio.sleep(BUFFER_FULL_WAIT)
 				else:
@@ -177,7 +214,8 @@ async def main( ser, args, gcodes ):
 		#print(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\t{BUFFSIZE}")
 		#await asyncio.sleep(1)
 
-	logger.info(f"all done, (how) ex(c)iting!")
+	logger.info(f"all done ; ex(c)iting!")
+	print(f"all done ; ex(c)iting!")
 	exit()
 
 if __name__ == '__main__':
@@ -292,8 +330,8 @@ if __name__ == '__main__':
 	except serial.serialutil.SerialException:
 		logger.fatal(f"could not open {ser.port}")
 	else:
-		try:
-			asyncio.run(main( ser, args, gcodes ))
-		except KeyboardInterrupt:
-			logger.fatal(f"aborted by user (ctrl+c)")
+		#try:
+		asyncio.run(main( ser, args, gcodes ))
+		#except KeyboardInterrupt:
+		#	logger.fatal(f"aborted by user (ctrl+c)")
 
