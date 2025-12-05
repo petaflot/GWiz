@@ -5,12 +5,13 @@
 
 # TODO: use "estimated printing time" (read gcode file from end!, or patch prusa slicer)
 # TODO: don't use 'GWiz' prefix in log!
+# TODO: check commands are valid before sending them!
+# TODO: notify TCP client of machin responses
 
 WAITING_FOR_SO_LONG=0
 
 import asyncio
 import serial
-from threading import Thread
 import logging
 import logging.config
 from sys import exit
@@ -26,7 +27,7 @@ BUFFER_FULL_WAIT = .01	# This will depend on prints... for a lot of details, low
 BUFFER_EMPTY_WAIT = .5	# in case buffer count goes wrong and printer sends "wait" signals
 # set this to the queue size if ADVANCED_OK is not set, else False
 ADVANCED_OK_WORKAROUND = False
-
+MAX_QUEUE_LEN = 25
 
 BUFFER_DEBUG = {'P': None, 'B': None, 'Pstarve': 0}
 # gets set to True when the last command has been ACKed
@@ -42,12 +43,93 @@ BUFFSIZE_INIT = None
 # True: print started (M75)
 # False: print paused (M76)
 PRINT_STARTED = None
+INHIBIT_FILE_SEND = True
+MACHINE_IS_HEATING = None
+PING_ENABLED = True
+AIO_SLEEP_DELAY = .015 # seems like too short of a delay can causer serial transmission errors!!
+LAST_KNOWN_Z, LAST_GCODE_LINE, START_AT_LINE = None, None, None
 
-def serial_read(ser):
-	global BUFFSIZE, BUFFSIZE_INIT
-
+async def echo_ping(tcp_queue, file_queue):
 	while True:
-		reply = ser.readline().decode().strip()
+		if PING_ENABLED:
+			print(f"ping {BUFFSIZE=} {len(tcp_queue)=}, {len(file_queue)=} {MACHINE_IS_HEATING=} {INHIBIT_FILE_SEND=}")
+		await asyncio.sleep(5)
+
+class NoTcpData(Exception): pass
+class SamePlayerPlayAgain(Exception): pass
+
+def get_last_known_Z(cmd):
+	import re
+	pattern = re.compile(b'\\bG([01235])(?!\\d)[^;]*?\\bZ(-?\\d*\\.?\\d+)',)
+	m = pattern.search(line)
+	if m:
+		LAST_KNOWN_Z = m.group(2)
+		print("Z value:", m.group(2))
+
+
+async def serial_write(ser, tcp_queue, file_queue):
+	logger.info("serial_write()")
+	try:
+		while True:
+			#print("serial_write()", end=' ')
+			#print(f"ping {BUFFSIZE=} {len(tcp_queue)=}, {len(file_queue)=}")
+			try:
+				try:
+					if not len(tcp_queue):
+						#print("no tcp data!", end = ' ')
+						raise NoTcpData
+					async for item in tcp_queue:
+						#print(f"serial_write(): tcp_queue {item.decode()}")
+						#logger.debug(f"serial_write(): tcp_queue {item.decode()}")
+						#print(f"(1) ping {BUFFSIZE=} {len(tcp_queue)=}, {len(file_queue)=} {MACHINE_IS_HEATING=} {INHIBIT_FILE_SEND=}")
+						ser.write(item)
+						if not len(tcp_queue):
+							raise NoTcpData
+				except NoTcpData:
+					# ensure we don't saturate the machine's buffer and priorityze tcp commands
+					if not len(file_queue) or INHIBIT_FILE_SEND or MACHINE_IS_HEATING:
+						#print("continue 1", end = ' ')
+						continue
+					#print(f"(1) ping {BUFFSIZE=} {len(tcp_queue)=}, {len(file_queue)=} {MACHINE_IS_HEATING=} {INHIBIT_FILE_SEND=}")
+					async for item in file_queue:
+						#logger.debug(f"serial_write(): file_queue {item.decode()}")
+						ser.write(item)
+						# ensure we don't saturate the machine's buffer and priorityze tcp commands
+						#print(f"(1) ping {BUFFSIZE=} {len(tcp_queue)=}, {len(file_queue)=} {MACHINE_IS_HEATING=} {INHIBIT_FILE_SEND=}")
+						if not len(file_queue) or len(tcp_queue) or INHIBIT_FILE_SEND or MACHINE_IS_HEATING:
+							#print(f"(3) ping {BUFFSIZE=} {len(tcp_queue)=}, {len(file_queue)=} {MACHINE_IS_HEATING=} {INHIBIT_FILE_SEND=}")
+							#print("continue 2", end = ' ')
+							raise SamePlayerPlayAgain
+			except SamePlayerPlayAgain:
+				pass
+			finally:
+				await asyncio.sleep(AIO_SLEEP_DELAY)
+	except RuntimeError:
+		print("serial_write(): lost connection")
+	except SerialException as e:
+		logging.error("Serial exception: %s", e)
+		# cleanup, cancel tasks, reconnect, etc.
+	except Exception as e:
+		logging.exception("Unexpected error in serial_task")
+		raise
+	except serial.serialutil.SerialException:
+		logger.fatal("SerialException: CPU reboot?")
+	finally:
+		print(f"{LAST_KNOWN_Z=} {START_AT_LINE=} P={BUFFER_DEBUG['P']} LP: L={LAST_GCODE_LINE};P={BUFFER_DEBUG['P']}")
+	logger.info("serial_write() was quit")
+
+
+async def serial_read(ser, tcp_queue):
+	global BUFFSIZE, BUFFSIZE_INIT, MACHINE_IS_HEATING, INHIBIT_FILE_SEND
+
+	logger.info("serial_read()")
+	while True:
+		try:
+			reply = ser.readline().decode().strip()
+		except serial.serialutil.SerialException:
+			logger.fatal("SerialException: CPU reboot?")
+			print(f"{LAST_KNOWN_Z=} {START_AT_LINE=}")
+			exit(1)
 		if reply.startswith('ok'):
 			try:
 				reply = reply.split(' ')[1:]
@@ -112,9 +194,25 @@ def serial_read(ser):
 			result.debug(reply)
 		elif reply.startswith( ('T:', 'X:') ):
 			# temperature and position reports
-			print(reply)
+			print(reply, BUFFSIZE)
+			if "W:0 " in reply :
+				# TODO: WTF.. this doesn't always work!!
+				if MACHINE_IS_HEATING:
+					result.info("Machine is hot!")
+				MACHINE_IS_HEATING = False
+			elif "W:" in reply:
+				if not MACHINE_IS_HEATING:
+					MACHINE_IS_HEATING = True
+					result.info("Machine is heating...")
+			else:
+				if MACHINE_IS_HEATING:
+					result.info("Machine is hot!")
+				MACHINE_IS_HEATING = False
+				
 			# TODO use W value from T:189.79 /198.00 B:31.18 /70.00 @:127 B@:127 W:? and adapt "WAITING_FOR_SO_LONG"
 
+		elif reply == 'echo:busy: paused for user':
+			INHIBIT_FILE_SEND = True	# NOTE this si bad! it seems it *sometimes* prevents unpausing!
 		elif reply.startswith( ('echo', '//') ):
 			if reply.startswith('echo:Unknown command:'):
 				result.error(reply)
@@ -123,7 +221,8 @@ def serial_read(ser):
 		elif BUFFSIZE is None and (reply in ('start', 'pages_ready', 'wait') or reply.startswith( ( 'T:', ) )):
 			result.info(f"machine ready ({reply})")
 			if not ADVANCED_OK_WORKAROUND:
-				ser.write(b'G4\n')
+				#ser.write(b'G4\n')
+				await tcp_queue.put(b'G4\n')
 				result.debug('G4; dwell for no time just so we get a clue of the queue size')
 			else:
 				BUFFSIZE = ADVANCED_OK_WORKAROUND
@@ -151,30 +250,55 @@ def serial_read(ser):
 		else:
 			result.warning(reply)
 
+		await asyncio.sleep(AIO_SLEEP_DELAY)
 
-async def main( ser, args, gcodes ):
-	global BUFFSIZE, BUFFSIZE_INIT#, WAIT_AND_QUIT
-	global WAITING_FOR_SO_LONG
+async def file_reader(gcodes, file_queue):
+	global BUFFSIZE, BUFFSIZE_INIT
+	global WAITING_FOR_SO_LONG, LAST_GCODE_LINE
 
-	t = Thread(target=serial_read, args=(ser,), daemon = True )	# TODO use asyncio task, not Thread!
-	t.start()
+	if START_AT_LINE:
+		if len(gcodes) > 1:
+			raise NotImplementedError("support for multiple gcode files is required")
+		from collections import deque
+		class BackTracker(deque):
+			def shove(self, item):
+				if self.full: self.get()
+				self.put(item)
 
-	await asyncio.sleep(1)
-	def _open( file ):
-		try:
-			return open(input_file, 'r')
-		except TypeError:
-			return file
+		backtrack_list = BackTracker(**BACKTRACKING_PARAMS)
 
 	for input_file in gcodes:
+		while INHIBIT_FILE_SEND or MACHINE_IS_HEATING: 
+			await asyncio.sleep(1)
 		logger.info(f"piping gcode from {input_file}")
-		with _open(input_file) as gcode:
+		with open(input_file) as gcode:
+			LAST_GCODE_LINE = -1
 			for line in gcode.readlines():
+				while INHIBIT_FILE_SEND or MACHINE_IS_HEATING: 
+					await asyncio.sleep(1)
+
+				LAST_GCODE_LINE += 1
+				# mechanism to allow resuming a print after a firmware crash
+				if START_AT_LINE is not None:
+					if START_AT_LINE > LAST_GCODE_LINE:
+						backtrack_list.shove(line)
+						get_last_known_Z(line)
+						continue
+					elif START_AT_LINE == LAST_GCODE_LINE:
+						await file_queue.put(bytes(f'G92 Z{LAST_KNOWN_Z}\n','ascii'))
+						await file_queue.put(bytes(f'G0 Z{LAST_KNOWN_Z+5}\n','ascii'))
+						await file_queue.put(b'G28 XY\n')
+						while not backtrack_list.empty():
+							await file_queue.put(backtrack_list.get())
+						del backtrack_list
+						
+#logger.debug
 				if not line.startswith(';'):
 					cmd = line.split(';',1)[0].strip().rstrip(' ')
 					if len(cmd):
 						while True:
 							try:
+								# note.. we *may* be losing instructions there when we get a TypeError! because we loop over and read a new line? (maybe)
 								if BUFFSIZE > 0:
 									BUFFSIZE -= 1
 									logger.debug(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\tB':{BUFFSIZE}\t>>>{cmd}<<<")
@@ -185,7 +309,8 @@ async def main( ser, args, gcodes ):
 									elif cmd == 'M77':
 										PRINT_STARTED = None
 									print(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\tB':{BUFFSIZE}\t{cmd}")
-									ser.write(bytes(cmd,args.encoding)+b'\n')
+									#ser.write(bytes(cmd,args.encoding)+b'\n')
+									await file_queue.put(bytes(cmd,args.encoding)+b'\n')
 									WAITING_FOR_SO_LONG = 0
 									break
 								elif BUFFER_DEBUG['B'] == 0:
@@ -200,12 +325,118 @@ async def main( ser, args, gcodes ):
 										await asyncio.sleep(BUFFER_FULL_WAIT)
 									except KeyboardInterrupt:
 										await asyncio.sleep(1)
-										logger.error("BUFFSIZE: user manual reset (KeyboardInterrupt)")
+										logger.error("BUFFSIZE (1): user manual reset (KeyboardInterrupt)")
 										BUFFSIZE = BUFFSIZE_INIT
 							except TypeError:
-								await asyncio.sleep(BUFFER_FULL_WAIT)
+								# jeu 17 jui 2025 14:44:50 CEST
+								# crashed here in the middle of a print.. added the KeyboardInterrupt thing but
+								# the printer needed a reboot (and re-home with manual offsets (6mm on X!) so I
+								# don't think the issue is with `gp`
+								try:
+									await asyncio.sleep(BUFFER_FULL_WAIT)
+								except KeyboardInterrupt:
+									await asyncio.sleep(1)
+									logger.error("BUFFSIZE (1): user manual reset (KeyboardInterrupt)")
+									BUFFSIZE = BUFFSIZE_INIT
+							finally:
+								if len(file_queue) == file_queue.maxlen:
+									await asyncio.sleep(.1)
+								else:
+									await asyncio.sleep(AIO_SLEEP_DELAY)
 				else:
 					result.debug(line.strip())
+		await asyncio.sleep(.1)
+	
+
+import termcolor
+async def handle_tcp_requests(reader, writer, tcp_queue): 
+	device_ip, _ = writer.get_extra_info("peername")
+	logger.info(termcolor.colored(f"new client connection from {device_ip}",'green'))
+	global INHIBIT_FILE_SEND, BUFFSIZE, MACHINE_IS_HEATING, PING_ENABLED, START_AT_LINE
+
+	while True:
+		data = await reader.readline()
+		try:
+			if data:
+				if data == b'\n':
+					pass
+				elif data == b'go\n':
+					INHIBIT_FILE_SEND = False
+					print("floodgates are open!")
+					continue
+				elif data == b'pause\n':
+					INHIBIT_FILE_SEND = True
+					print("pausing print")
+					continue
+				elif data == b'hot\n':
+					MACHINE_IS_HEATING = False
+					print(f"machine state set to hot")
+					continue
+				elif data == b'info\n':
+					print(f"info: {BUFFSIZE=} {len(tcp_queue)=}, len(file_queue)= {MACHINE_IS_HEATING=} {INHIBIT_FILE_SEND=}")
+				elif data == b'ping\n':
+					PING_ENABLED = not PING_ENABLED
+					print(f"ping {'enabled' if PING_ENABLED else 'disabled'}")
+				#elif data.startswith(b"start@"):
+				#	START_AT_LINE = int(data.split(b'@')[1].strip())
+				elif data.startswith(b'buffsize='):
+					BUFFSIZE = int(data.split(b'=')[1].strip())
+					print(data)
+				elif data.startswith(b"resume_on_crash:"):
+					param = data.split(b":")[1].strip().split(b':')
+					dic = {}
+					for p in param:
+						p = p.split(b'=')
+						dic[p[0]] = p[1]
+					BACKTRACKING_PARAMS, START_AT_LINE = {'maxlen': BUFFER_DEBUG['P']-int(dic['P']),}, dic['L']
+
+				else:
+					#logger.info(termcolor.colored(f"TCP FORWARD: {data}",'yellow'))
+					if data == b'M108\n':
+						INHIBIT_FILE_SEND = False
+						print("INHIBIT_FILE_SEND disabled :-)")
+					await tcp_queue.put(data)
+		except Exception as e:
+			print(e)
+		finally:
+			await asyncio.sleep(AIO_SLEEP_DELAY)
+	print("handle_tcp_requests() exit")
+
+
+
+async def main( ser, args, gcodes ):
+	#global BUFFSIZE, BUFFSIZE_INIT#, WAIT_AND_QUIT
+
+	def _open( file ):
+		try:
+			return open(input_file, 'r')
+		except TypeError:
+			return file
+
+	from async_deque import AsyncDeque
+	# NOTE: un peu limite nul/overkill d'utiliser une deque si on en a 2!
+	async with AsyncDeque(maxlen=MAX_QUEUE_LEN) as tcp_queue:
+		server = await asyncio.start_server(
+			lambda r, w: handle_tcp_requests(r,w,tcp_queue),
+			'0.0.0.0', 7000)
+
+		def handle_task_exception(loop, context):
+			msg = context.get("exception", context["message"])
+			logging.error(f"Unhandled exception in task: {msg}", exc_info=context.get("exception"))
+
+		loop = asyncio.get_event_loop()
+		loop.set_exception_handler(handle_task_exception)
+
+		async with AsyncDeque(maxlen=MAX_QUEUE_LEN) as file_queue:
+			asyncio.get_event_loop().set_debug(True)
+			await asyncio.gather(
+				echo_ping(tcp_queue, file_queue),
+				server.serve_forever(),
+				serial_read(ser, tcp_queue),
+				serial_write(ser, tcp_queue, file_queue),
+				file_reader(gcodes, file_queue)
+			)
+
 	#WAIT_AND_QUIT = True
 	#
 	#logger.debug(f"no gcode left, waiting for machine to finish")
@@ -213,10 +444,14 @@ async def main( ser, args, gcodes ):
 	#	await asyncio.sleep(BUFFER_FULL_WAIT)
 		#print(f"P:{BUFFER_DEBUG['P']}\tB:{BUFFER_DEBUG['B']}\t{BUFFSIZE}")
 		#await asyncio.sleep(1)
+	logger.info("stopping TCP server")
+	server.stop()
 
 	logger.info(f"all done ; ex(c)iting!")
 	print(f"all done ; ex(c)iting!")
 	exit()
+
+
 
 if __name__ == '__main__':
 	import argparse
@@ -247,8 +482,6 @@ if __name__ == '__main__':
 	if args.log_level:
 		logger.setLevel(args.log_level)
 	logger.debug(f"Logging initialized: {__name__}")
-
-
 
 	ser = serial.Serial(timeout=args.timeout)
 
@@ -325,13 +558,16 @@ if __name__ == '__main__':
 		gcodes = [ stdin ]
 
 
+
 	try:
 		ser.open()
 	except serial.serialutil.SerialException:
 		logger.fatal(f"could not open {ser.port}")
 	else:
-		#try:
-		asyncio.run(main( ser, args, gcodes ))
+		try:
+			asyncio.run(main( ser, args, gcodes ))
+		except RuntimeError:
+			pass
 		#except KeyboardInterrupt:
 		#	logger.fatal(f"aborted by user (ctrl+c)")
 

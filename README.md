@@ -7,12 +7,14 @@ GWiz is an advanced gcode *"man-in-the-middleware"* that aims to make it comfort
 
 ## gp
 
-This repository also include a command-line utility `gp` to pipe gcode from files or stdin to a machine ; unlike most similar utilities that can be found at the time of this writing, `gp` doesn't use the naive approach of *"I send a command and wait for an answer before sending the next command"* but instead uses threading for async read/writes. Still, `gp` doesn't actually work yet (it is likely to just stop the print anytime) so don't use it for production.
+This repository also include a command-line utility `gp` to pipe gcode from files or stdin to a machine ; unlike most similar utilities that can be found at the time of this writing, `gp` doesn't use the naive approach of *"I send a command and wait for an answer before sending the next command"* but instead uses threading for async read/writes. With quite a bit of effort required by what can be considered suboptimal conditions (transmission errors, faulty hardare, arguable design choices at many different levels) and a few workarounds, `gp` was finally able to pipe commands to the machine at very high rates on a quite slow CPU (*BTT CB1*) and always recover from errors (except for spurious reboots of a what seems to be a defective microcontroller). Very recently, support was added for a listening TCP server that allows command injection (such as in infamous `M108` and control et the some variables and states of the program. The last feature added was a method to resume prints at the precise command this happened (typically in case of microcontroller reboots) that takes into account the state of Marlin's planner buffer.
+
+Testing was done with a fairly basic command-line client (see `tcp-client.py` that, also not more than a few lines, does have support for pre-recorded and dynamic macros.
 
 ### TODO
 
-* when gcode files are provided as arguments, allow insertion of gcode commands with stdin, therefore combining the main features of `pronsole` and `printcore`.
 * allow reading from an open file without closing it, like `tail` does
+* more testing, fixing or working around a few strange but not fatal bugs
 
 ## GWiz
 
@@ -33,6 +35,10 @@ Other notable features include:
 
 more info in the `proghelp.py` file (or when running the program itself).
 
+### TODO
+
+* implement TCP communication (inbound and outbound)
+* a few improvements on the interface
 
 # How to run GWiz
 
@@ -55,7 +61,7 @@ G-Code Wizard is in early development stage.
 
 ![static/GWiz.jpg](static/GWiz.jpg)
 
-GWiz playing the Tetris theme while the user is searching for commands whose description contains the words terms `hot` and `tem`.
+GWiz playing the Tetris theme while the user is searching for commands with a description contains the words terms `hot` and `tem`.
 
 
 [^print]: prints or any other program sent to a machine

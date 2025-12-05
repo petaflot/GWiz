@@ -62,7 +62,7 @@ Weird:
 
 loop, wai_pile, wip_pile, ack_pile, edit, machine_pos, messages, tbars, info_dic, machine_status, gcode_piles, watch_pipe, div, cmd_pile, all_wai, editmap = [None for _ in range(16)]
 PRINT_PAUSED = True
-MAX_COMMANDS_IN_WIP = 5#12
+MAX_COMMANDS_IN_WIP = 5#12  # TODO exclude comments from this count!
 # max lines to show in piles
 DISP_ACK_LEN = 30
 DISP_WAI_LEN = 10
@@ -356,6 +356,7 @@ def read_from_serial(s):
                     # ignore this shit, we don't need that as a "clock" XD
                     # see HOST_KEEPALIVE_FEATURE DEFAULT_KEEPALIVE_INTERVAL BUSY_WHILE_HEATING NO_TIMEOUTS
                     MACHINE_READY = True
+                    #logger.error(f"{reply}")
                     pass
                 elif reply.startswith(b'X:'):
                     machine_pos.set_text(reply.split(b' Count ',1)[0])
@@ -465,7 +466,6 @@ def serial_comm_still_ok(data):
                     i = 0
                 i += 1
                 sleep(.1)
-
 
         return True
 
